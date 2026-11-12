@@ -1,5 +1,6 @@
 //! Display-server independent model of monitors and their configuration.
 
+pub mod badge;
 pub mod layout;
 pub mod output;
 
@@ -26,6 +27,13 @@ pub trait Backend {
     /// Ask the display server whether `apply` would accept a configuration,
     /// without changing anything.
     fn test(&mut self, config: &[OutputConfig]) -> Result<(), Error>;
+
+    /// Show a number badge on each named output until `end_identify`.
+    /// `labels` pairs connector names with the number to show.
+    fn identify(&mut self, labels: &[(String, usize)]) -> Result<(), Error>;
+
+    /// Remove the badges shown by `identify`.
+    fn end_identify(&mut self);
 }
 
 #[derive(Debug)]

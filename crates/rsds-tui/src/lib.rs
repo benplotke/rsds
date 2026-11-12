@@ -99,6 +99,17 @@ fn perform<B: Backend>(app: &mut App, backend: &mut B, request: Request) {
     let (configs, is_revert) = match request {
         Request::Apply(c) => (c, false),
         Request::Revert(c) => (c, true),
+        Request::Identify(labels) => {
+            if let Err(e) = backend.identify(&labels) {
+                app.identify_until = None;
+                app.status = Some(format!("Identify failed: {e}"));
+            }
+            return;
+        }
+        Request::EndIdentify => {
+            backend.end_identify();
+            return;
+        }
     };
     let previous: Vec<OutputConfig> = backend.outputs().iter().map(|o| o.config()).collect();
     let mut result = backend.apply(&configs);
@@ -191,6 +202,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<Option<Request>, Flow> {
         KeyCode::Char('q') => return Err(Flow::Quit),
         KeyCode::Char('a') => return Ok(app.apply()),
         KeyCode::Char('r') => app.reset(),
+        KeyCode::Char('i') => return Ok(Some(app.identify())),
         KeyCode::Esc => app.focus = Focus::Displays,
         KeyCode::Tab | KeyCode::BackTab => {
             app.focus = match app.focus {
@@ -259,6 +271,8 @@ fn handle_mouse(app: &mut App, m: MouseEvent) -> Option<Request> {
                 return app.apply();
             } else if app.hits.reset.is_some_and(|r| hit(&r, col, row)) {
                 app.reset();
+            } else if app.hits.identify.is_some_and(|r| hit(&r, col, row)) {
+                return Some(app.identify());
             }
         }
         MouseEventKind::Drag(MouseButton::Left) => app.drag_to((col, row)),

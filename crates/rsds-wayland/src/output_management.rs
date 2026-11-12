@@ -5,7 +5,7 @@ use wayland_client::{
     Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum,
     backend::WaylandError,
     event_created_child,
-    globals::{GlobalListContents, registry_queue_init},
+    globals::{GlobalList, GlobalListContents, registry_queue_init},
     protocol::{wl_output, wl_registry},
 };
 use wayland_protocols_wlr::output_management::v1::client::{
@@ -33,7 +33,8 @@ struct HeadState {
 }
 
 #[derive(Default)]
-struct State {
+pub(crate) struct State {
+    pub(crate) identify: crate::identify::Identify,
     heads: Vec<HeadState>,
     modes: Vec<ModeState>,
     /// Snapshot of `heads` taken at the last `done` event.
@@ -80,6 +81,7 @@ pub struct WaylandBackend {
     queue: EventQueue<State>,
     qh: QueueHandle<State>,
     manager: ZwlrOutputManagerV1,
+    globals: GlobalList,
     state: State,
 }
 
@@ -100,7 +102,7 @@ impl WaylandBackend {
                 .map_err(|e| Error::Connection(e.to_string()))?;
         }
         state.changed = false;
-        Ok(Self { wl_backend: conn.backend(), queue, qh, manager, state })
+        Ok(Self { wl_backend: conn.backend(), queue, qh, manager, globals, state })
     }
 
     fn connection_error(e: impl std::fmt::Display) -> Error {
@@ -125,6 +127,9 @@ impl Backend for WaylandBackend {
         self.queue
             .dispatch_pending(&mut self.state)
             .map_err(Self::connection_error)?;
+        // Event handlers may have queued replies (e.g. acking a configure and
+        // attaching a buffer); send them now rather than at the next wakeup.
+        self.queue.flush().map_err(Self::connection_error)?;
         if self.state.finished {
             return Err(Error::Connection("output manager finished".into()));
         }
@@ -141,6 +146,15 @@ impl Backend for WaylandBackend {
 
     fn test(&mut self, config: &[OutputConfig]) -> Result<(), Error> {
         self.submit(config, true)
+    }
+
+    fn identify(&mut self, labels: &[(String, usize)]) -> Result<(), Error> {
+        crate::identify::show(&mut self.state, &mut self.queue, &self.qh, &self.globals, labels)
+    }
+
+    fn end_identify(&mut self) {
+        crate::identify::hide(&mut self.state);
+        let _ = self.queue.flush();
     }
 }
 

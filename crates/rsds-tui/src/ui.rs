@@ -277,11 +277,15 @@ fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
         Span::styled(" Apply ", apply_style),
         Span::raw(" "),
         Span::styled(" Reset ", reset_style),
+        Span::raw(" "),
+        Span::styled(" Identify ", text),
         Span::raw("   "),
         Span::styled("a", key),
         Span::styled(" apply  ", text),
         Span::styled("r", key),
         Span::styled(" reset  ", text),
+        Span::styled("i", key),
+        Span::styled(" identify  ", text),
         Span::styled("esc", key),
         Span::styled(" back  ", text),
         Span::styled("tab", key),
@@ -295,6 +299,7 @@ fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
     ];
     app.hits.apply = Some(Rect { x: area.x + 1, width: 7, ..area });
     app.hits.reset = Some(Rect { x: area.x + 9, width: 7, ..area });
+    app.hits.identify = Some(Rect { x: area.x + 17, width: 10, ..area });
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 
     if let Some(msg) = &app.status {

@@ -10,6 +10,9 @@ use rsds_core::{
 /// How long a newly applied configuration waits for confirmation.
 pub const REVERT_AFTER: Duration = Duration::from_secs(15);
 
+/// How long Identify shows the monitor numbers.
+pub const IDENTIFY_FOR: Duration = Duration::from_secs(3);
+
 /// A monitor in the UI: its live state and the edits not yet applied.
 pub struct Entry {
     /// Number shown in the UI (and later by Identify). Stable while running.
@@ -254,6 +257,10 @@ pub enum Request {
     Apply(Vec<OutputConfig>),
     /// Restore the configuration from before the last apply.
     Revert(Vec<OutputConfig>),
+    /// Show each monitor's number on it: (connector name, number).
+    Identify(Vec<(String, usize)>),
+    /// Remove the Identify badges.
+    EndIdentify,
 }
 
 /// Screen regions recorded during drawing, for mouse hit testing.
@@ -269,6 +276,7 @@ pub struct Hits {
     pub reset: Option<ratatui::layout::Rect>,
     pub keep: Option<ratatui::layout::Rect>,
     pub revert: Option<ratatui::layout::Rect>,
+    pub identify: Option<ratatui::layout::Rect>,
 }
 
 pub struct App {
@@ -281,6 +289,8 @@ pub struct App {
     pub frozen_view: Option<View>,
     pub view: Option<View>,
     pub confirm: Option<Confirm>,
+    /// When the Identify badges should be removed.
+    pub identify_until: Option<Instant>,
     pub status: Option<String>,
     pub hits: Hits,
 }
@@ -305,6 +315,7 @@ impl App {
             frozen_view: None,
             view: None,
             confirm: None,
+            identify_until: None,
             status: None,
             hits: Hits::default(),
         }
@@ -608,10 +619,30 @@ impl App {
 
     /// Time until the next timed event, if any.
     pub fn next_deadline(&self) -> Option<Instant> {
-        self.confirm.as_ref().map(|c| c.deadline)
+        let confirm = self.confirm.as_ref().map(|c| c.deadline);
+        match (confirm, self.identify_until) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// Show each active monitor's number on it for a few seconds.
+    pub fn identify(&mut self) -> Request {
+        self.identify_until = Some(Instant::now() + IDENTIFY_FOR);
+        let labels = self
+            .entries
+            .iter()
+            .filter(|e| e.live.enabled)
+            .map(|e| (e.live.name.clone(), e.number))
+            .collect();
+        Request::Identify(labels)
     }
 
     pub fn tick(&mut self, now: Instant) -> Option<Request> {
+        if self.identify_until.is_some_and(|t| now >= t) {
+            self.identify_until = None;
+            return Some(Request::EndIdentify);
+        }
         if self.confirm.as_ref().is_some_and(|c| now >= c.deadline) {
             return self.revert();
         }

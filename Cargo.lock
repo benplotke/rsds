@@ -597,6 +597,7 @@ name = "rsds-wayland"
 version = "0.1.0"
 dependencies = [
  "rsds-core",
+ "rustix",
  "wayland-client",
  "wayland-protocols-wlr",
 ]
