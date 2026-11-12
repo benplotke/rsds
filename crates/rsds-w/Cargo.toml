@@ -1,0 +1,8 @@
+[package]
+name = "rsds-w"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rsds-tui = { version = "0.1.0", path = "../rsds-tui" }
+rsds-wayland = { version = "0.1.0", path = "../rsds-wayland" }
