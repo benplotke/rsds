@@ -39,7 +39,7 @@ enum Flow {
 }
 
 fn event_loop<B: Backend>(terminal: &mut DefaultTerminal, backend: &mut B) -> io::Result<()> {
-    let mut app = App::new(backend.outputs());
+    let mut app = App::new(backend.outputs(), rsds_logind::Backlight::find());
     let stdin = io::stdin();
     // Start crossterm's event source now so it installs its SIGWINCH
     // handler; the signal interrupts poll() below and we pick up resizes.
@@ -227,6 +227,14 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<Option<Request>, Flow> {
     Ok(None)
 }
 
+/// Brightness for a mouse position on the vertical slider: top row is 100%,
+/// bottom row 0%.
+fn slider_percent(bar: Rect, row: u16) -> i32 {
+    let span = bar.height.saturating_sub(1).max(1) as i32;
+    let from_bottom = (bar.bottom() as i32 - 1 - row as i32).clamp(0, span);
+    (from_bottom * 100 + span / 2) / span
+}
+
 fn hit(r: &Rect, col: u16, row: u16) -> bool {
     r.contains(Position::new(col, row))
 }
@@ -251,9 +259,13 @@ fn handle_mouse(app: &mut App, m: MouseEvent) -> Option<Request> {
             } else if let Some(&(i, _)) = app.hits.list_rows.iter().find(|(_, r)| hit(r, col, row)) {
                 app.select(i);
                 app.focus = Focus::Displays;
-            } else if let Some(&(i, _)) = app.hits.setting_rows.iter().find(|(_, r)| hit(r, col, row)) {
+            } else if let Some(&(setting, _)) = app.hits.setting_rows.iter().find(|(_, r)| hit(r, col, row)) {
                 app.focus = Focus::Settings;
-                app.setting = i;
+                app.setting = setting;
+            } else if let Some(bar) = app.hits.slider.filter(|r| hit(r, col, row)) {
+                app.focus = Focus::Options;
+                app.slider_drag = true;
+                app.set_brightness(slider_percent(bar, row));
             } else if let Some(&(i, _)) = app.hits.choices.iter().find(|(_, r)| hit(r, col, row)) {
                 app.focus = Focus::Options;
                 app.choose(i);
@@ -265,8 +277,16 @@ fn handle_mouse(app: &mut App, m: MouseEvent) -> Option<Request> {
                 return Some(app.identify());
             }
         }
+        MouseEventKind::Drag(MouseButton::Left) if app.slider_drag => {
+            if let Some(bar) = app.hits.slider {
+                app.set_brightness(slider_percent(bar, row));
+            }
+        }
         MouseEventKind::Drag(MouseButton::Left) => app.drag_to((col, row)),
-        MouseEventKind::Up(MouseButton::Left) => app.end_drag(),
+        MouseEventKind::Up(MouseButton::Left) => {
+            app.slider_drag = false;
+            app.end_drag();
+        }
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
             // The wheel does what up/down do in the pane under the mouse.
             if let Some(&(pane, _)) = app.hits.panes.iter().find(|(_, r)| hit(r, col, row)) {
@@ -329,14 +349,14 @@ mod tests {
 
     #[test]
     fn renders() {
-        let mut app = App::new(&sample());
+        let mut app = App::new(&sample(), None);
         println!("{}", render(&mut app));
         assert_eq!(app.entries[0].live.name, "eDP-1");
     }
 
     #[test]
     fn drag_rightmost_to_left() {
-        let mut app = App::new(&sample());
+        let mut app = App::new(&sample(), None);
         render(&mut app);
         let (i, r) = app.hits.monitors.iter().find(|(i, _)| app.entries[*i].live.name == "DP-5").copied().unwrap();
         // Grab the middle and drag to the left edge of the terminal.
@@ -353,7 +373,7 @@ mod tests {
 
     #[test]
     fn disabling_middle_closes_gap() {
-        let mut app = App::new(&sample());
+        let mut app = App::new(&sample(), None);
         app.select(1); // DP-3
         app.toggle_enabled();
         assert_eq!(app.entries[2].pending.position, (1920, 0));

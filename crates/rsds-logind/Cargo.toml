@@ -1,0 +1,8 @@
+[package]
+name = "rsds-logind"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+dbus = "0.9.12"

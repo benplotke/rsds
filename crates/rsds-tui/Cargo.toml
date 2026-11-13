@@ -6,4 +6,5 @@ edition = "2024"
 [dependencies]
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29"] }
 rsds-core = { version = "0.1.0", path = "../rsds-core" }
+rsds-logind = { version = "0.1.0", path = "../rsds-logind" }
 rustix = { version = "1.1.6", features = ["event"] }

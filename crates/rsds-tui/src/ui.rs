@@ -11,7 +11,7 @@ use ratatui::{
 };
 use rsds_core::layout::Rect as LRect;
 
-use crate::app::{App, Choice, Entry, Focus, Hits, SETTINGS, Setting, View};
+use crate::app::{App, Choice, Entry, Focus, Hits, Setting, View};
 
 // Colours loosely after btop's default theme.
 const FG: Color = Color::Rgb(0xcc, 0xcc, 0xcc);
@@ -28,7 +28,7 @@ const WARN: Color = Color::Rgb(0xe0, 0xb0, 0x40);
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     app.hits = Hits::default();
-    let list_height = (app.entries.len() as u16 + 2).max(SETTINGS.len() as u16 + 2);
+    let list_height = (app.entries.len() as u16 + 2).max(app.settings().len() as u16 + 2);
     let [top, bottom, footer] = Layout::vertical([
         Constraint::Min(8),
         Constraint::Length(list_height),
@@ -165,17 +165,19 @@ fn draw_settings(f: &mut Frame, app: &mut App, area: Rect) {
     let Some(e) = app.selected_entry() else { return };
 
     const LABEL_W: usize = 14;
+    let current = app.current_setting();
+    let brightness = app.brightness();
     let mut rows = Vec::new();
-    for (i, setting) in SETTINGS.iter().enumerate() {
+    for (i, setting) in app.settings().into_iter().enumerate() {
         if i as u16 >= inner.height {
             break;
         }
         let row = Rect { y: inner.y + i as u16, height: 1, ..inner };
-        let (label, value) = setting_text(e, *setting);
-        let active = e.pending.enabled || *setting == Setting::Enabled;
+        let (label, value) = setting_text(e, setting, brightness);
+        let active = e.pending.enabled || setting == Setting::Enabled;
         let mut label_style = Style::new().fg(if active { FG } else { INACTIVE });
         let mut value_style = Style::new().fg(if active { TITLE } else { INACTIVE });
-        if i == app.setting {
+        if setting == current {
             let bg = if focused { SELECTED_BG } else { UNFOCUSED_BG };
             label_style = label_style.bg(bg);
             value_style = value_style.bg(bg).add_modifier(Modifier::BOLD);
@@ -186,29 +188,84 @@ fn draw_settings(f: &mut Frame, app: &mut App, area: Rect) {
             Paragraph::new(Line::from(vec![Span::styled(label, label_style), Span::styled(value, value_style)])),
             row,
         );
-        rows.push((i, row));
+        rows.push((setting, row));
     }
     app.hits.setting_rows = rows;
 }
 
 fn draw_options(f: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::Options;
+    let setting = app.current_setting();
     let (label, _) = match app.selected_entry() {
-        Some(e) => setting_text(e, SETTINGS[app.setting]),
+        Some(e) => setting_text(e, setting, None),
         None => ("", String::new()),
     };
     let title = format!("options: {}", label.to_lowercase());
     let block = boxed(&title, OPTIONS_BOX, focused);
     let inner = block.inner(area);
     f.render_widget(block, area);
-    draw_choices(f, app, Rect { x: inner.x + 1, width: inner.width.saturating_sub(1), ..inner });
+    let area = Rect { x: inner.x + 1, width: inner.width.saturating_sub(2), ..inner };
+    if setting == Setting::Brightness {
+        draw_slider(f, app, area);
+    } else {
+        draw_choices(f, app, area);
+    }
 }
 
-fn setting_text(e: &Entry, s: Setting) -> (&'static str, String) {
+/// Brightness slider: a vertical bar on the left of the pane, filled from
+/// the bottom in half-row steps, with the percentage and a key hint beside it.
+fn draw_slider(f: &mut Frame, app: &mut App, area: Rect) {
+    let enabled = app.selected_entry().is_some_and(|e| e.pending.enabled);
+    let Some(percent) = app.brightness().filter(|_| enabled) else { return };
+    if area.width < 4 || area.height == 0 {
+        return;
+    }
+    let focused = app.focus == Focus::Options;
+    let rows = area.height;
+    let halves = (percent as u32 * rows as u32 * 2 + 50) / 100;
+    let fill = Style::new().fg(if focused { HI } else { TITLE });
+    let empty = Style::new().fg(INACTIVE);
+    let bar: Vec<Line> = (0..rows)
+        .map(|y| {
+            // Half-row units below the top of this row (counted from the bottom).
+            let below = (rows - 1 - y) as u32 * 2;
+            match halves.saturating_sub(below) {
+                0 => Line::styled("│", empty),
+                1 => Line::styled("╻", fill),
+                _ => Line::styled("┃", fill),
+            }
+        })
+        .collect();
+    f.render_widget(Paragraph::new(bar), Rect { width: 1, ..area });
+
+    let text_x = area.x + 3;
+    let text_w = area.width.saturating_sub(3);
+    let mid = area.y + rows.saturating_sub(1) / 2;
+    let value = Span::styled(format!("{percent}%"), Style::new().fg(TITLE).add_modifier(Modifier::BOLD));
+    f.render_widget(Paragraph::new(value), Rect::new(text_x, mid, text_w, 1));
+    if mid + 2 < area.bottom() {
+        let key = Style::new().fg(HI).add_modifier(Modifier::BOLD);
+        let hint = Line::from(vec![
+            Span::styled("↑", key),
+            Span::styled(" brighter  ", Style::new().fg(INACTIVE)),
+            Span::styled("↓", key),
+            Span::styled(" dimmer  · applies immediately", Style::new().fg(INACTIVE)),
+        ]);
+        f.render_widget(Paragraph::new(hint), Rect::new(text_x, mid + 2, text_w, 1));
+    }
+    // Clickable area: the bar plus a column either side, so it's easy to hit.
+    let x = area.x.saturating_sub(1);
+    app.hits.slider = Some(Rect::new(x, area.y, area.x + 2 - x, rows));
+}
+
+fn setting_text(e: &Entry, s: Setting, brightness: Option<u8>) -> (&'static str, String) {
     let on = e.pending.enabled;
     let mode = e.pending.mode.filter(|_| on);
     let value = match s {
         Setting::Enabled => Some(Choice::Enabled(on)),
+        Setting::Brightness => {
+            return ("Brightness", brightness.filter(|_| on).map_or_else(|| "—".into(), |p| format!("{p}%")));
+        }
         Setting::Resolution => mode.map(|m| Choice::Resolution((m.width, m.height))),
         Setting::Refresh => mode.map(Choice::Refresh),
         Setting::Orientation => on.then_some(Choice::Orientation(e.pending.transform)),
@@ -216,6 +273,7 @@ fn setting_text(e: &Entry, s: Setting) -> (&'static str, String) {
     };
     let label = match s {
         Setting::Enabled => "Display",
+        Setting::Brightness => "Brightness",
         Setting::Resolution => "Resolution",
         Setting::Refresh => "Refresh rate",
         Setting::Orientation => "Orientation",

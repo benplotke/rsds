@@ -17,8 +17,11 @@ Decisions made during development that aren't in the README.
 - Nightlight: held by the daemon; fixed-time schedule only; adjustable colour temperature.
 - Identify: drawn by the UI process. Wayland: layer-shell + wl_shm buffer, digits drawn
   as simple blocky shapes (no font library). X11: one override-redirect window per monitor.
-- Brightness: logind `SetBrightness` over D-Bus (no root, no udev rules). Shown for
-  internal panels (connector `eDP*`/`LVDS*`/`DSI*`).
+- Brightness: logind `SetBrightness` over D-Bus (no root, no udev rules), via the `dbus`
+  crate (libdbus-1). Current level read from sysfs. Shown for internal panels (connector
+  `eDP*`/`LVDS*`/`DSI*`) when a backlight device exists, preferring firmware > platform > raw.
+  Applied immediately, outside Apply/Revert. 0% maps to the lowest non-zero level so the
+  panel never switches off.
 - Lid close: the daemon holds a logind `handle-lid-switch` inhibitor only while external
   monitors are connected, and turns off the internal panel when the lid closes.
 - Monitor identity in profiles: EDID make|model|serial; falls back to connector name when
@@ -41,5 +44,6 @@ Decisions made during development that aren't in the README.
 - `rsds-wayland`: wlroots backend.
 - `rsds-tui`: ratatui UI, generic over `Backend`.
 - `rsds-daemon`: hotplug/profile service, generic over `Backend`.
+- `rsds-logind`: logind/sysfs integration (backlight; later the lid inhibitor).
 - `rsds-w`: Wayland binary.
 - (to come) `rsds-x11`, `rsds-x`.

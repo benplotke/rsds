@@ -102,19 +102,24 @@ impl Focus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Setting {
     Enabled,
+    /// Built-in panel only; applied immediately, not part of Apply/Revert.
+    Brightness,
     Resolution,
     Refresh,
     Orientation,
     Scale,
 }
 
-pub const SETTINGS: [Setting; 5] = [
+const DISPLAY_SETTINGS: [Setting; 5] = [
     Setting::Enabled,
     Setting::Resolution,
     Setting::Refresh,
     Setting::Orientation,
     Setting::Scale,
 ];
+
+/// Brightness step for keys and the scroll wheel, in percent.
+const BRIGHTNESS_STEP: i32 = 5;
 
 pub const ORIENTATIONS: [Transform; 4] = [
     Transform::Normal,
@@ -281,8 +286,9 @@ pub struct Hits {
     pub list_rows: Vec<(usize, ratatui::layout::Rect)>,
     /// The three bottom panes.
     pub panes: Vec<(Focus, ratatui::layout::Rect)>,
-    /// (setting index, row)
-    pub setting_rows: Vec<(usize, ratatui::layout::Rect)>,
+    pub setting_rows: Vec<(Setting, ratatui::layout::Rect)>,
+    /// The brightness slider's bar.
+    pub slider: Option<ratatui::layout::Rect>,
     /// (choice index, cell) in the options panel.
     pub choices: Vec<(usize, ratatui::layout::Rect)>,
     pub apply: Option<ratatui::layout::Rect>,
@@ -296,8 +302,10 @@ pub struct App {
     pub entries: Vec<Entry>,
     pub selected: usize,
     pub focus: Focus,
-    pub setting: usize,
+    pub setting: Setting,
     pub drag: Option<Drag>,
+    /// The mouse is dragging the brightness slider.
+    pub slider_drag: bool,
     /// View used while dragging, so the map does not rescale under the mouse.
     pub frozen_view: Option<View>,
     pub view: Option<View>,
@@ -305,11 +313,13 @@ pub struct App {
     /// When the Identify badges should be removed.
     pub identify_until: Option<Instant>,
     pub status: Option<String>,
+    /// The built-in panel's backlight, if this machine has one.
+    pub backlight: Option<rsds_logind::Backlight>,
     pub hits: Hits,
 }
 
 impl App {
-    pub fn new(outputs: &[Output]) -> Self {
+    pub fn new(outputs: &[Output], backlight: Option<rsds_logind::Backlight>) -> Self {
         let mut sorted: Vec<&Output> = outputs.iter().collect();
         sorted.sort_by(|a, b| {
             (!a.is_internal(), natural_key(&a.name)).cmp(&(!b.is_internal(), natural_key(&b.name)))
@@ -323,13 +333,15 @@ impl App {
             entries,
             selected: 0,
             focus: Focus::Displays,
-            setting: 0,
+            setting: Setting::Enabled,
             drag: None,
+            slider_drag: false,
             frozen_view: None,
             view: None,
             confirm: None,
             identify_until: None,
             status: None,
+            backlight,
             hits: Hits::default(),
         }
     }
@@ -383,21 +395,53 @@ impl App {
         }
     }
 
+    /// Settings shown for the selected monitor.
+    pub fn settings(&self) -> Vec<Setting> {
+        let mut v = DISPLAY_SETTINGS.to_vec();
+        if self.backlight.is_some() && self.selected_entry().is_some_and(|e| e.live.is_internal()) {
+            v.insert(1, Setting::Brightness);
+        }
+        v
+    }
+
+    /// The selected setting, falling back to the first one if the selected
+    /// monitor doesn't have it (e.g. Brightness on an external monitor).
+    pub fn current_setting(&self) -> Setting {
+        let settings = self.settings();
+        if settings.contains(&self.setting) { self.setting } else { settings[0] }
+    }
+
     pub fn move_setting(&mut self, delta: i32) {
-        let n = SETTINGS.len() as i32;
-        self.setting = (self.setting as i32 + delta).rem_euclid(n) as usize;
+        let settings = self.settings();
+        let idx = settings.iter().position(|s| *s == self.current_setting()).unwrap_or(0);
+        self.setting = settings[(idx as i32 + delta).rem_euclid(settings.len() as i32) as usize];
+    }
+
+    /// Brightness of the built-in panel in percent, read fresh from sysfs.
+    pub fn brightness(&self) -> Option<u8> {
+        self.backlight.as_ref()?.percent().ok()
+    }
+
+    /// Set the built-in panel's brightness immediately.
+    pub fn set_brightness(&mut self, percent: i32) {
+        let Some(b) = self.backlight.as_mut() else { return };
+        if let Err(e) = b.set_percent(percent.clamp(0, 100) as u8) {
+            self.status = Some(format!("Couldn't set brightness: {e}"));
+        }
     }
 
     /// The available values of the current setting for the selected
     /// monitor, in display order, and the index of the pending value.
     pub fn choices(&self) -> (Vec<Choice>, Option<usize>) {
         let Some(e) = self.selected_entry() else { return (Vec::new(), None) };
-        let setting = SETTINGS[self.setting];
+        let setting = self.current_setting();
         if !e.pending.enabled && setting != Setting::Enabled {
             return (Vec::new(), None);
         }
         let choices: Vec<Choice> = match setting {
             Setting::Enabled => vec![Choice::Enabled(true), Choice::Enabled(false)],
+            // Shown as a slider rather than a list.
+            Setting::Brightness => Vec::new(),
             Setting::Resolution => e.resolutions().into_iter().map(Choice::Resolution).collect(),
             Setting::Refresh => match e.pending.mode {
                 Some(m) => e.refresh_modes((m.width, m.height)).into_iter().map(Choice::Refresh).collect(),
@@ -433,7 +477,21 @@ impl App {
     }
 
     /// Step the current setting of the selected monitor through its choices.
+    /// For brightness, up (negative delta) is brighter.
     pub fn change_setting(&mut self, delta: i32) {
+        if self.current_setting() == Setting::Brightness {
+            if let Some(p) = self.brightness() {
+                // Snap to the step grid so repeated presses land on round values.
+                let p = p as i32;
+                let next = if delta < 0 {
+                    (p / BRIGHTNESS_STEP + 1) * BRIGHTNESS_STEP
+                } else {
+                    (p + BRIGHTNESS_STEP - 1) / BRIGHTNESS_STEP * BRIGHTNESS_STEP - BRIGHTNESS_STEP
+                };
+                self.set_brightness(next);
+            }
+            return;
+        }
         let (choices, current) = self.choices();
         if choices.is_empty() {
             return;

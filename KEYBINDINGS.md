@@ -18,6 +18,10 @@ The UI has an arrangement view at the top and three panes along the bottom:
 Moving through the options changes the pending value immediately; nothing
 reaches the display server until you apply.
 
+**Brightness** (built-in panel only) is the exception: its options pane is a
+slider, `↑` makes the panel brighter and `↓` dimmer in 5% steps, and the change
+takes effect immediately. It is not part of Apply, Reset or the revert countdown.
+
 ## Actions
 
 | Key | Action |
@@ -45,6 +49,7 @@ Shown after applying. Reverts automatically after 15 seconds.
 | Click a monitor or a row in the displays pane | Select that monitor |
 | Click a setting | Select that setting |
 | Click an option | Choose that option |
+| Click or drag on the brightness slider | Set brightness to that point |
 | Scroll wheel over a pane | Same as `↑` / `↓` in that pane |
 | Click **Apply** / **Reset** / **Identify** | Same as `a` / `r` / `i` |
 | Click **Keep** / **Revert** in the dialog | Keep or revert |
