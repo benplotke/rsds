@@ -24,7 +24,7 @@ Computers should do what we want, and no more. Programs should do what they do w
 - Graphical view has automatic snapping
 - All available monitors are visible in the UI, but disabled ones are grayed out
 - Brightness slider for the built-in display, on laptops only
-- Night Light toggle with optional schedule
+- Nightlight toggle with optional schedule
 - Identify button which causes each screen to flash its number
 - List of monitors with the settings for each
 - Settings for each monitor are: on or off, primary, resolution, refresh rate, orientation and scale
