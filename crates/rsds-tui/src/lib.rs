@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use app::{App, Focus, Request, SETTINGS, Setting};
+use app::{App, Focus, Request};
 use ratatui::{
     DefaultTerminal,
     crossterm::{
@@ -212,28 +212,15 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<Option<Request>, Flow> {
         KeyCode::Char('a') => return Ok(app.apply()),
         KeyCode::Char('r') => app.reset(),
         KeyCode::Char('i') => return Ok(Some(app.identify())),
-        KeyCode::Esc => app.focus = Focus::Displays,
-        KeyCode::Tab | KeyCode::BackTab => {
-            app.focus = match app.focus {
-                Focus::Displays => Focus::Settings,
-                Focus::Settings => Focus::Displays,
-            }
+        KeyCode::Tab => app.focus = app.focus.next(),
+        KeyCode::BackTab => app.focus = app.focus.prev(),
+        KeyCode::Up | KeyCode::Char('k') => app.move_in_focus(-1),
+        KeyCode::Down | KeyCode::Char('j') => app.move_in_focus(1),
+        KeyCode::Left | KeyCode::Char('h') if app.focus != Focus::Displays => {
+            app.focus = app.focus.prev()
         }
-        KeyCode::Up | KeyCode::Char('k') => match app.focus {
-            Focus::Displays => app.move_selection(-1),
-            Focus::Settings => app.move_setting(-1),
-        },
-        KeyCode::Down | KeyCode::Char('j') => match app.focus {
-            Focus::Displays => app.move_selection(1),
-            Focus::Settings => app.move_setting(1),
-        },
-        KeyCode::Left | KeyCode::Char('h') if app.focus == Focus::Settings => app.change_setting(-1),
-        KeyCode::Right | KeyCode::Char('l') if app.focus == Focus::Settings => app.change_setting(1),
-        KeyCode::Right | KeyCode::Enter if app.focus == Focus::Displays => app.focus = Focus::Settings,
-        KeyCode::Char(' ') | KeyCode::Enter
-            if app.focus == Focus::Settings && SETTINGS[app.setting] == Setting::Enabled =>
-        {
-            app.toggle_enabled()
+        KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter if app.focus != Focus::Options => {
+            app.focus = app.focus.next()
         }
         _ => {}
     }
@@ -264,17 +251,11 @@ fn handle_mouse(app: &mut App, m: MouseEvent) -> Option<Request> {
             } else if let Some(&(i, _)) = app.hits.list_rows.iter().find(|(_, r)| hit(r, col, row)) {
                 app.select(i);
                 app.focus = Focus::Displays;
-            } else if let Some(&(i, _, dec, inc)) =
-                app.hits.setting_rows.iter().find(|(_, r, _, _)| hit(r, col, row))
-            {
+            } else if let Some(&(i, _)) = app.hits.setting_rows.iter().find(|(_, r)| hit(r, col, row)) {
                 app.focus = Focus::Settings;
                 app.setting = i;
-                if hit(&dec, col, row) {
-                    app.change_setting(-1);
-                } else if hit(&inc, col, row) || SETTINGS[i] == Setting::Enabled {
-                    app.change_setting(1);
-                }
             } else if let Some(&(i, _)) = app.hits.choices.iter().find(|(_, r)| hit(r, col, row)) {
+                app.focus = Focus::Options;
                 app.choose(i);
             } else if app.hits.apply.is_some_and(|r| hit(&r, col, row)) {
                 return app.apply();
@@ -287,13 +268,10 @@ fn handle_mouse(app: &mut App, m: MouseEvent) -> Option<Request> {
         MouseEventKind::Drag(MouseButton::Left) => app.drag_to((col, row)),
         MouseEventKind::Up(MouseButton::Left) => app.end_drag(),
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-            let delta = if m.kind == MouseEventKind::ScrollUp { 1 } else { -1 };
-            if let Some(&(i, ..)) = app.hits.setting_rows.iter().find(|(_, r, _, _)| hit(r, col, row)) {
-                app.focus = Focus::Settings;
-                app.setting = i;
-                app.change_setting(delta);
-            } else if app.hits.list_rows.iter().any(|(_, r)| hit(r, col, row)) {
-                app.move_selection(-delta);
+            // The wheel does what up/down do in the pane under the mouse.
+            if let Some(&(pane, _)) = app.hits.panes.iter().find(|(_, r)| hit(r, col, row)) {
+                app.focus = pane;
+                app.move_in_focus(if m.kind == MouseEventKind::ScrollUp { -1 } else { 1 });
             }
         }
         _ => {}

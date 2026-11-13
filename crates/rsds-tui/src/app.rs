@@ -76,6 +76,27 @@ impl Entry {
 pub enum Focus {
     Displays,
     Settings,
+    Options,
+}
+
+impl Focus {
+    /// The pane to the right, wrapping around.
+    pub fn next(self) -> Self {
+        match self {
+            Focus::Displays => Focus::Settings,
+            Focus::Settings => Focus::Options,
+            Focus::Options => Focus::Displays,
+        }
+    }
+
+    /// The pane to the left, wrapping around.
+    pub fn prev(self) -> Self {
+        match self {
+            Focus::Displays => Focus::Options,
+            Focus::Settings => Focus::Displays,
+            Focus::Options => Focus::Settings,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -258,8 +279,10 @@ pub enum Request {
 pub struct Hits {
     pub monitors: Vec<(usize, ratatui::layout::Rect)>,
     pub list_rows: Vec<(usize, ratatui::layout::Rect)>,
-    /// (setting index, whole row, decrease arrow, increase arrow)
-    pub setting_rows: Vec<(usize, ratatui::layout::Rect, ratatui::layout::Rect, ratatui::layout::Rect)>,
+    /// The three bottom panes.
+    pub panes: Vec<(Focus, ratatui::layout::Rect)>,
+    /// (setting index, row)
+    pub setting_rows: Vec<(usize, ratatui::layout::Rect)>,
     /// (choice index, cell) in the options panel.
     pub choices: Vec<(usize, ratatui::layout::Rect)>,
     pub apply: Option<ratatui::layout::Rect>,
@@ -400,13 +423,17 @@ impl App {
         (choices, current)
     }
 
+    /// Up/down within the focused pane.
+    pub fn move_in_focus(&mut self, delta: i32) {
+        match self.focus {
+            Focus::Displays => self.move_selection(delta),
+            Focus::Settings => self.move_setting(delta),
+            Focus::Options => self.change_setting(delta),
+        }
+    }
+
     /// Step the current setting of the selected monitor through its choices.
     pub fn change_setting(&mut self, delta: i32) {
-        if SETTINGS[self.setting] == Setting::Enabled {
-            self.status = None;
-            self.toggle_enabled();
-            return;
-        }
         let (choices, current) = self.choices();
         if choices.is_empty() {
             return;

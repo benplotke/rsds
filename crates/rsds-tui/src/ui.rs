@@ -22,6 +22,7 @@ const SELECTED_BG: Color = Color::Rgb(0x6a, 0x2f, 0x2f);
 const LAYOUT_BOX: Color = Color::Rgb(0x55, 0x6d, 0x59);
 const LIST_BOX: Color = Color::Rgb(0x5c, 0x58, 0x8d);
 const SETTINGS_BOX: Color = Color::Rgb(0x80, 0x52, 0x52);
+const OPTIONS_BOX: Color = Color::Rgb(0x6c, 0x6c, 0x4b);
 const MONITOR: Color = Color::Rgb(0x90, 0x90, 0x90);
 const WARN: Color = Color::Rgb(0xe0, 0xb0, 0x40);
 
@@ -34,12 +35,18 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Constraint::Length(1),
     ])
     .areas(f.area());
-    let [list, settings] =
-        Layout::horizontal([Constraint::Length(40), Constraint::Min(30)]).areas(bottom);
+    let [list, settings, options] = Layout::horizontal([
+        Constraint::Length(40),
+        Constraint::Length(SETTINGS_W),
+        Constraint::Min(20),
+    ])
+    .areas(bottom);
 
     draw_arrangement(f, app, top);
     draw_list(f, app, list);
     draw_settings(f, app, settings);
+    draw_options(f, app, options);
+    app.hits.panes = vec![(Focus::Displays, list), (Focus::Settings, settings), (Focus::Options, options)];
     draw_footer(f, app, footer);
     if app.confirm.is_some() {
         draw_confirm(f, app);
@@ -133,12 +140,18 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
         let text = format!("{dirty}{:>2} {:<7} {name}{state}", e.number, e.live.name);
         let mut style = Style::new().fg(if e.pending.enabled { FG } else { INACTIVE });
         if i == app.selected {
-            style = style.bg(if focused { SELECTED_BG } else { Color::Rgb(0x30, 0x30, 0x30) });
+            style = style.bg(if focused { SELECTED_BG } else { UNFOCUSED_BG });
         }
         f.render_widget(Paragraph::new(pad_to(&text, row.width)).style(style), row);
         app.hits.list_rows.push((i, row));
     }
 }
+
+/// Background for the selected row of a pane that doesn't have focus.
+const UNFOCUSED_BG: Color = Color::Rgb(0x30, 0x30, 0x30);
+
+/// Width of the settings pane, borders included.
+const SETTINGS_W: u16 = 44;
 
 fn draw_settings(f: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::Settings;
@@ -151,50 +164,44 @@ fn draw_settings(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(block, area);
     let Some(e) = app.selected_entry() else { return };
 
-    const LABEL_W: u16 = 15;
-    const VALUE_W: u16 = 26;
+    const LABEL_W: usize = 14;
     let mut rows = Vec::new();
     for (i, setting) in SETTINGS.iter().enumerate() {
         if i as u16 >= inner.height {
             break;
         }
-        let width = (LABEL_W + VALUE_W + 2).min(inner.width);
-        let row = Rect { y: inner.y + i as u16, height: 1, width, ..inner };
+        let row = Rect { y: inner.y + i as u16, height: 1, ..inner };
         let (label, value) = setting_text(e, *setting);
         let active = e.pending.enabled || *setting == Setting::Enabled;
-        let is_cur = focused && i == app.setting;
-
-        let label_style = Style::new().fg(if active { FG } else { INACTIVE });
-        let value_style = if is_cur {
-            Style::new().fg(TITLE).bg(SELECTED_BG).add_modifier(Modifier::BOLD)
-        } else {
-            Style::new().fg(if active { TITLE } else { INACTIVE })
-        };
-        let arrow_style = Style::new().fg(if active { HI } else { INACTIVE });
-        let line = Line::from(vec![
-            Span::styled(format!(" {:<w$}", label, w = LABEL_W as usize - 1), label_style),
-            Span::styled("◀", arrow_style),
-            Span::styled(center(&value, VALUE_W as usize), value_style),
-            Span::styled("▶", arrow_style),
-        ]);
-        f.render_widget(Paragraph::new(line), row);
-
-        let dec = Rect { x: row.x + LABEL_W, width: 1, ..row };
-        let inc = Rect { x: row.x + LABEL_W + 1 + VALUE_W, width: 1, ..row };
-        rows.push((i, row, dec, inc));
+        let mut label_style = Style::new().fg(if active { FG } else { INACTIVE });
+        let mut value_style = Style::new().fg(if active { TITLE } else { INACTIVE });
+        if i == app.setting {
+            let bg = if focused { SELECTED_BG } else { UNFOCUSED_BG };
+            label_style = label_style.bg(bg);
+            value_style = value_style.bg(bg).add_modifier(Modifier::BOLD);
+        }
+        let label = format!(" {label:<LABEL_W$}");
+        let value = pad_to(&value, row.width.saturating_sub(LABEL_W as u16 + 1));
+        f.render_widget(
+            Paragraph::new(Line::from(vec![Span::styled(label, label_style), Span::styled(value, value_style)])),
+            row,
+        );
+        rows.push((i, row));
     }
     app.hits.setting_rows = rows;
+}
 
-    if focused {
-        let x = inner.x + LABEL_W + VALUE_W + 2;
-        let divider = Rect { x: x + 1, width: 1, ..inner };
-        if divider.right() < inner.right() {
-            let bar = vec![Line::styled("│", Style::new().fg(SETTINGS_BOX)); inner.height as usize];
-            f.render_widget(Paragraph::new(bar), divider);
-            let options = Rect { x: x + 3, width: inner.right().saturating_sub(x + 3), ..inner };
-            draw_choices(f, app, options);
-        }
-    }
+fn draw_options(f: &mut Frame, app: &mut App, area: Rect) {
+    let focused = app.focus == Focus::Options;
+    let (label, _) = match app.selected_entry() {
+        Some(e) => setting_text(e, SETTINGS[app.setting]),
+        None => ("", String::new()),
+    };
+    let title = format!("options: {}", label.to_lowercase());
+    let block = boxed(&title, OPTIONS_BOX, focused);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    draw_choices(f, app, Rect { x: inner.x + 1, width: inner.width.saturating_sub(1), ..inner });
 }
 
 fn setting_text(e: &Entry, s: Setting) -> (&'static str, String) {
@@ -244,7 +251,8 @@ fn draw_choices(f: &mut Frame, app: &mut App, area: Rect) {
         let cell = Rect::new(x, area.y + (i % rows) as u16, w, 1);
         let fg = if choices[i].is_recommended(e) { HI } else { FG };
         let style = if Some(i) == current {
-            Style::new().fg(TITLE).bg(SELECTED_BG).add_modifier(Modifier::BOLD)
+            let bg = if app.focus == Focus::Options { SELECTED_BG } else { UNFOCUSED_BG };
+            Style::new().fg(TITLE).bg(bg).add_modifier(Modifier::BOLD)
         } else {
             Style::new().fg(fg)
         };
@@ -286,14 +294,10 @@ fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
         Span::styled(" reset  ", text),
         Span::styled("i", key),
         Span::styled(" identify  ", text),
-        Span::styled("esc", key),
-        Span::styled(" back  ", text),
-        Span::styled("tab", key),
-        Span::styled(" focus  ", text),
         Span::styled("↑↓", key),
         Span::styled(" select  ", text),
         Span::styled("←→", key),
-        Span::styled(" change  ", text),
+        Span::styled(" pane  ", text),
         Span::styled("q", key),
         Span::styled(" quit", text),
     ];
@@ -349,13 +353,4 @@ fn pad_to(s: &str, width: u16) -> String {
     } else {
         format!("{s}{}", " ".repeat(w - n))
     }
-}
-
-fn center(s: &str, width: usize) -> String {
-    let n = s.chars().count();
-    if n >= width {
-        return s.chars().take(width).collect();
-    }
-    let left = (width - n) / 2;
-    format!("{}{s}{}", " ".repeat(left), " ".repeat(width - n - left))
 }
