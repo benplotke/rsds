@@ -6,6 +6,10 @@
 //!   the remaining ones are slid together to close gaps; and if every
 //!   monitor would be off, they are all turned on.
 //! - At startup, the saved profile (if any) for the current set is applied.
+//! - Nightlight: applies the colour temperature from the settings file,
+//!   following its schedule (see `nightlight`).
+
+mod nightlight;
 
 use std::io;
 
@@ -19,8 +23,15 @@ use rustix::event::{PollFd, PollFlags};
 macro_rules! log {
     ($($arg:tt)*) => { eprintln!("rsds daemon: {}", format_args!($($arg)*)) };
 }
+pub(crate) use log;
 
 pub fn run<B: Backend>(mut backend: B) -> io::Result<()> {
+    let Some(_lock) = rsds_core::daemon_lock::acquire()? else {
+        return Err(io::Error::other("the daemon is already running"));
+    };
+    let mut nightlight = nightlight::Service::new()?;
+    nightlight.update(&mut backend);
+
     // Identities of the monitors seen last time; None until the first pass.
     let mut known: Option<Vec<String>> = None;
     loop {
@@ -37,12 +48,26 @@ pub fn run<B: Backend>(mut backend: B) -> io::Result<()> {
             known = Some(set);
         }
 
-        let mut fds = [PollFd::from_borrowed_fd(backend.fd(), PollFlags::IN)];
-        match rustix::event::poll(&mut fds, None) {
-            Ok(_) | Err(rustix::io::Errno::INTR) => {}
-            Err(e) => return Err(e.into()),
-        }
+        let (config_ready, timer_ready) = {
+            let [config, timer] = nightlight.fds();
+            let mut fds = [
+                PollFd::from_borrowed_fd(backend.fd(), PollFlags::IN),
+                PollFd::from_borrowed_fd(config, PollFlags::IN),
+                PollFd::from_borrowed_fd(timer, PollFlags::IN),
+            ];
+            match rustix::event::poll(&mut fds, None) {
+                Ok(_) | Err(rustix::io::Errno::INTR) => {}
+                Err(e) => return Err(e.into()),
+            }
+            (!fds[1].revents().is_empty(), !fds[2].revents().is_empty())
+        };
         backend.dispatch().map_err(io::Error::other)?;
+        if config_ready {
+            nightlight.config_changed(&mut backend);
+        }
+        if timer_ready {
+            nightlight.timer_fired(&mut backend);
+        }
     }
 }
 

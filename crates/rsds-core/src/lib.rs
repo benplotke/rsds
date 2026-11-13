@@ -1,7 +1,9 @@
 //! Display-server independent model of monitors and their configuration.
 
 pub mod badge;
+pub mod daemon_lock;
 pub mod layout;
+pub mod nightlight;
 pub mod output;
 pub mod profile;
 
@@ -35,6 +37,11 @@ pub trait Backend {
 
     /// Remove the badges shown by `identify`.
     fn end_identify(&mut self);
+
+    /// Tint all outputs to a colour temperature (kelvin), or remove the
+    /// tint with None. The backend keeps applying it to outputs that are
+    /// connected later.
+    fn set_color_temperature(&mut self, kelvin: Option<u32>) -> Result<(), Error>;
 }
 
 #[derive(Debug)]

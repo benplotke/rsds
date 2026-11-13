@@ -35,6 +35,7 @@ struct HeadState {
 #[derive(Default)]
 pub(crate) struct State {
     pub(crate) identify: crate::identify::Identify,
+    pub(crate) gamma: crate::gamma::Gamma,
     heads: Vec<HeadState>,
     modes: Vec<ModeState>,
     /// Snapshot of `heads` taken at the last `done` event.
@@ -156,6 +157,11 @@ impl Backend for WaylandBackend {
         crate::identify::hide(&mut self.state);
         let _ = self.queue.flush();
     }
+
+    fn set_color_temperature(&mut self, kelvin: Option<u32>) -> Result<(), Error> {
+        crate::gamma::set(&mut self.state, &self.qh, &self.globals, kelvin)?;
+        self.queue.flush().map_err(Self::connection_error)
+    }
 }
 
 impl WaylandBackend {
@@ -250,13 +256,14 @@ fn to_wl_transform(t: Transform) -> wl_output::Transform {
 
 impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
     fn event(
-        _: &mut Self,
-        _: &wl_registry::WlRegistry,
-        _: wl_registry::Event,
+        state: &mut Self,
+        registry: &wl_registry::WlRegistry,
+        event: wl_registry::Event,
         _: &GlobalListContents,
         _: &Connection,
-        _: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
     ) {
+        crate::gamma::registry_event(state, registry, event, qh);
     }
 }
 

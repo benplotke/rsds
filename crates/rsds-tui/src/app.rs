@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use rsds_core::{
     Mode, Output, OutputConfig, Transform,
+    nightlight::{self, Nightlight, TimeOfDay},
     layout::{self, Rect},
 };
 
@@ -74,27 +75,36 @@ impl Entry {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
+    /// The left-most pane: Displays / Nightlight.
+    Sections,
+    /// The monitor list (Displays section only).
     Displays,
     Settings,
     Options,
 }
 
-impl Focus {
-    /// The pane to the right, wrapping around.
-    pub fn next(self) -> Self {
+/// What the bottom panes are about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Section {
+    Displays,
+    Nightlight,
+}
+
+pub const SECTIONS: [Section; 2] = [Section::Displays, Section::Nightlight];
+
+impl Section {
+    pub fn label(self) -> &'static str {
         match self {
-            Focus::Displays => Focus::Settings,
-            Focus::Settings => Focus::Options,
-            Focus::Options => Focus::Displays,
+            Section::Displays => "Displays",
+            Section::Nightlight => "Nightlight",
         }
     }
 
-    /// The pane to the left, wrapping around.
-    pub fn prev(self) -> Self {
+    /// The panes shown for this section, left to right.
+    pub fn panes(self) -> &'static [Focus] {
         match self {
-            Focus::Displays => Focus::Options,
-            Focus::Settings => Focus::Displays,
-            Focus::Options => Focus::Settings,
+            Section::Displays => &[Focus::Sections, Focus::Displays, Focus::Settings, Focus::Options],
+            Section::Nightlight => &[Focus::Sections, Focus::Settings, Focus::Options],
         }
     }
 }
@@ -108,7 +118,26 @@ pub enum Setting {
     Refresh,
     Orientation,
     Scale,
+    // Nightlight section; applied immediately (saved for the daemon).
+    NightlightEnabled,
+    Temperature,
+    Schedule,
+    ScheduleStart,
+    ScheduleEnd,
 }
+
+const NIGHTLIGHT_SETTINGS: [Setting; 5] = [
+    Setting::NightlightEnabled,
+    Setting::Temperature,
+    Setting::Schedule,
+    Setting::ScheduleStart,
+    Setting::ScheduleEnd,
+];
+
+/// Colour temperature step for keys and the scroll wheel, in kelvin.
+pub const TEMPERATURE_STEP: u32 = 100;
+/// Granularity of the schedule's times, in minutes.
+const TIME_STEP: u16 = 15;
 
 const DISPLAY_SETTINGS: [Setting; 5] = [
     Setting::Enabled,
@@ -149,6 +178,7 @@ pub enum Choice {
     Refresh(Mode),
     Orientation(Transform),
     Scale(f64),
+    Time(TimeOfDay),
 }
 
 impl Choice {
@@ -160,6 +190,7 @@ impl Choice {
             Choice::Refresh(r) => mode.is_some_and(|m| m.same_as(&r)),
             Choice::Orientation(t) => t == e.pending.transform,
             Choice::Scale(s) => (s - e.pending.scale).abs() < 1e-6,
+            Choice::Time(_) => false,
         }
     }
 
@@ -185,6 +216,7 @@ impl Choice {
             Choice::Refresh(m) => format!("{:.3} Hz{rec}", m.refresh_hz()),
             Choice::Orientation(t) => orientation_label(t).into(),
             Choice::Scale(s) => format!("{}%", (s * 100.0).round()),
+            Choice::Time(t) => t.to_string(),
         }
     }
 }
@@ -284,8 +316,9 @@ pub enum Request {
 pub struct Hits {
     pub monitors: Vec<(usize, ratatui::layout::Rect)>,
     pub list_rows: Vec<(usize, ratatui::layout::Rect)>,
-    /// The three bottom panes.
+    /// The bottom panes.
     pub panes: Vec<(Focus, ratatui::layout::Rect)>,
+    pub section_rows: Vec<(Section, ratatui::layout::Rect)>,
     pub setting_rows: Vec<(Setting, ratatui::layout::Rect)>,
     /// The brightness slider's bar.
     pub slider: Option<ratatui::layout::Rect>,
@@ -302,6 +335,11 @@ pub struct App {
     pub entries: Vec<Entry>,
     pub selected: usize,
     pub focus: Focus,
+    pub section: Section,
+    /// Nightlight settings, saved for the daemon on every change.
+    pub nightlight: Nightlight,
+    /// Whether the daemon (which applies Nightlight) is running.
+    pub daemon_running: bool,
     pub setting: Setting,
     pub drag: Option<Drag>,
     /// The mouse is dragging the brightness slider.
@@ -333,6 +371,9 @@ impl App {
             entries,
             selected: 0,
             focus: Focus::Displays,
+            section: Section::Displays,
+            nightlight: Nightlight::default(),
+            daemon_running: false,
             setting: Setting::Enabled,
             drag: None,
             slider_drag: false,
@@ -395,8 +436,78 @@ impl App {
         }
     }
 
-    /// Settings shown for the selected monitor.
+    /// Load the Nightlight settings and check for the daemon.
+    pub fn load_nightlight(&mut self) {
+        match Nightlight::load() {
+            Ok(n) => self.nightlight = n,
+            Err(e) => self.status = Some(format!("Couldn't read Nightlight settings: {e}")),
+        }
+        self.daemon_running = rsds_core::daemon_lock::is_running();
+    }
+
+    fn save_nightlight(&mut self) {
+        if let Err(e) = self.nightlight.save() {
+            self.status = Some(format!("Couldn't save Nightlight settings: {e}"));
+        }
+    }
+
+    /// Set the Nightlight colour temperature (clamped and rounded to a step).
+    pub fn set_temperature(&mut self, kelvin: i64) {
+        let step = TEMPERATURE_STEP as i64;
+        let k = ((kelvin + step / 2) / step * step).clamp(nightlight::MIN_K as i64, nightlight::MAX_K as i64);
+        if k as u32 != self.nightlight.temperature {
+            self.nightlight.temperature = k as u32;
+            self.save_nightlight();
+        }
+    }
+
+    /// Fraction 0..=1 of the temperature slider.
+    pub fn temperature_fraction(&self) -> f64 {
+        let (lo, hi) = (nightlight::MIN_K as f64, nightlight::MAX_K as f64);
+        (self.nightlight.temperature as f64 - lo) / (hi - lo)
+    }
+
+    /// Set the slider of the current setting from a fraction 0..=1.
+    pub fn set_slider(&mut self, fraction: f64) {
+        match self.current_setting() {
+            Setting::Brightness => self.set_brightness((fraction * 100.0).round() as i32),
+            Setting::Temperature => {
+                let (lo, hi) = (nightlight::MIN_K as f64, nightlight::MAX_K as f64);
+                self.set_temperature((lo + fraction * (hi - lo)).round() as i64)
+            }
+            _ => {}
+        }
+    }
+
+    pub fn set_section(&mut self, section: Section) {
+        if section != self.section {
+            self.section = section;
+            if section == Section::Nightlight {
+                self.daemon_running = rsds_core::daemon_lock::is_running();
+            }
+        }
+    }
+
+    /// Move focus one pane right (`delta` 1) or left (-1), without wrapping.
+    pub fn move_focus(&mut self, delta: i32) {
+        let panes = self.section.panes();
+        let i = panes.iter().position(|p| *p == self.focus).unwrap_or(0) as i32;
+        self.focus = panes[(i + delta).clamp(0, panes.len() as i32 - 1) as usize];
+    }
+
+    /// Cycle focus through the section's panes (Tab / Shift+Tab).
+    pub fn cycle_focus(&mut self, delta: i32) {
+        let panes = self.section.panes();
+        let i = panes.iter().position(|p| *p == self.focus).unwrap_or(0) as i32;
+        self.focus = panes[(i + delta).rem_euclid(panes.len() as i32) as usize];
+    }
+
+    /// Settings shown in the settings pane: for the selected monitor, or
+    /// Nightlight's.
     pub fn settings(&self) -> Vec<Setting> {
+        if self.section == Section::Nightlight {
+            return NIGHTLIGHT_SETTINGS.to_vec();
+        }
         let mut v = DISPLAY_SETTINGS.to_vec();
         if self.backlight.is_some() && self.selected_entry().is_some_and(|e| e.live.is_internal()) {
             v.insert(1, Setting::Brightness);
@@ -433,6 +544,9 @@ impl App {
     /// The available values of the current setting for the selected
     /// monitor, in display order, and the index of the pending value.
     pub fn choices(&self) -> (Vec<Choice>, Option<usize>) {
+        if self.section == Section::Nightlight {
+            return self.nightlight_choices();
+        }
         let Some(e) = self.selected_entry() else { return (Vec::new(), None) };
         let setting = self.current_setting();
         if !e.pending.enabled && setting != Setting::Enabled {
@@ -462,14 +576,41 @@ impl App {
                 }
                 scales.into_iter().map(Choice::Scale).collect()
             }
+            _ => Vec::new(),
         };
         let current = choices.iter().position(|c| c.is_current(e));
         (choices, current)
     }
 
+    fn nightlight_choices(&self) -> (Vec<Choice>, Option<usize>) {
+        let n = &self.nightlight;
+        let on_off = |v: bool| (vec![Choice::Enabled(true), Choice::Enabled(false)], Some(if v { 0 } else { 1 }));
+        let times = |current: TimeOfDay| {
+            let mut v: Vec<TimeOfDay> =
+                (0..TimeOfDay::MINUTES_PER_DAY).step_by(TIME_STEP as usize).map(TimeOfDay).collect();
+            if !v.contains(&current) {
+                v.push(current);
+                v.sort();
+            }
+            let i = v.iter().position(|t| *t == current);
+            (v.into_iter().map(Choice::Time).collect(), i)
+        };
+        match self.current_setting() {
+            Setting::NightlightEnabled => on_off(n.enabled),
+            Setting::Schedule => on_off(n.schedule),
+            Setting::ScheduleStart => times(n.start),
+            Setting::ScheduleEnd => times(n.end),
+            _ => (Vec::new(), None), // Temperature is a slider.
+        }
+    }
+
     /// Up/down within the focused pane.
     pub fn move_in_focus(&mut self, delta: i32) {
         match self.focus {
+            Focus::Sections => {
+                let i = SECTIONS.iter().position(|s| *s == self.section).unwrap_or(0) as i32;
+                self.set_section(SECTIONS[(i + delta).clamp(0, SECTIONS.len() as i32 - 1) as usize]);
+            }
             Focus::Displays => self.move_selection(delta),
             Focus::Settings => self.move_setting(delta),
             Focus::Options => self.change_setting(delta),
@@ -492,6 +633,12 @@ impl App {
             }
             return;
         }
+        if self.current_setting() == Setting::Temperature {
+            // Up (negative delta) is a higher temperature: cooler, less tint.
+            let k = self.nightlight.temperature as i64 - delta as i64 * TEMPERATURE_STEP as i64;
+            self.set_temperature(k);
+            return;
+        }
         let (choices, current) = self.choices();
         if choices.is_empty() {
             return;
@@ -508,6 +655,19 @@ impl App {
         self.status = None;
         let (choices, _) = self.choices();
         let Some(&choice) = choices.get(index) else { return };
+        if self.section == Section::Nightlight {
+            let setting = self.current_setting();
+            let n = &mut self.nightlight;
+            match (setting, choice) {
+                (Setting::NightlightEnabled, Choice::Enabled(on)) => n.enabled = on,
+                (Setting::Schedule, Choice::Enabled(on)) => n.schedule = on,
+                (Setting::ScheduleStart, Choice::Time(t)) => n.start = t,
+                (Setting::ScheduleEnd, Choice::Time(t)) => n.end = t,
+                _ => return,
+            }
+            self.save_nightlight();
+            return;
+        }
         let i = self.selected;
         let e = &mut self.entries[i];
         match choice {
@@ -539,6 +699,7 @@ impl App {
             }
             Choice::Orientation(t) => e.pending.transform = t,
             Choice::Scale(scale) => e.pending.scale = scale,
+            Choice::Time(_) => return,
         }
         self.fixup_layout(i);
     }
@@ -612,6 +773,7 @@ impl App {
 
     pub fn begin_drag(&mut self, index: usize, cell: (u16, u16)) {
         self.select(index);
+        self.set_section(Section::Displays);
         self.focus = Focus::Displays;
         let Some(e) = self.entries.get(index) else { return };
         if !e.pending.enabled {

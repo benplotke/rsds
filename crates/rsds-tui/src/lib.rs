@@ -40,6 +40,7 @@ enum Flow {
 
 fn event_loop<B: Backend>(terminal: &mut DefaultTerminal, backend: &mut B) -> io::Result<()> {
     let mut app = App::new(backend.outputs(), rsds_logind::Backlight::find());
+    app.load_nightlight();
     let stdin = io::stdin();
     // Start crossterm's event source now so it installs its SIGWINCH
     // handler; the signal interrupts poll() below and we pick up resizes.
@@ -212,27 +213,23 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<Option<Request>, Flow> {
         KeyCode::Char('a') => return Ok(app.apply()),
         KeyCode::Char('r') => app.reset(),
         KeyCode::Char('i') => return Ok(Some(app.identify())),
-        KeyCode::Tab => app.focus = app.focus.next(),
-        KeyCode::BackTab => app.focus = app.focus.prev(),
+        KeyCode::Tab => app.cycle_focus(1),
+        KeyCode::BackTab => app.cycle_focus(-1),
         KeyCode::Up | KeyCode::Char('k') => app.move_in_focus(-1),
         KeyCode::Down | KeyCode::Char('j') => app.move_in_focus(1),
-        KeyCode::Left | KeyCode::Char('h') if app.focus != Focus::Displays => {
-            app.focus = app.focus.prev()
-        }
-        KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter if app.focus != Focus::Options => {
-            app.focus = app.focus.next()
-        }
+        KeyCode::Left | KeyCode::Char('h') => app.move_focus(-1),
+        KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => app.move_focus(1),
         _ => {}
     }
     Ok(None)
 }
 
-/// Brightness for a mouse position on the vertical slider: top row is 100%,
-/// bottom row 0%.
-fn slider_percent(bar: Rect, row: u16) -> i32 {
+/// Slider position (0..=1) for a mouse row on a vertical slider: the top
+/// row is 1, the bottom row 0.
+fn slider_fraction(bar: Rect, row: u16) -> f64 {
     let span = bar.height.saturating_sub(1).max(1) as i32;
     let from_bottom = (bar.bottom() as i32 - 1 - row as i32).clamp(0, span);
-    (from_bottom * 100 + span / 2) / span
+    from_bottom as f64 / span as f64
 }
 
 fn hit(r: &Rect, col: u16, row: u16) -> bool {
@@ -256,6 +253,9 @@ fn handle_mouse(app: &mut App, m: MouseEvent) -> Option<Request> {
             // Monitors drawn last are on top, so search in reverse.
             if let Some(&(i, _)) = app.hits.monitors.iter().rev().find(|(_, r)| hit(r, col, row)) {
                 app.begin_drag(i, (col, row));
+            } else if let Some(&(s, _)) = app.hits.section_rows.iter().find(|(_, r)| hit(r, col, row)) {
+                app.set_section(s);
+                app.focus = Focus::Sections;
             } else if let Some(&(i, _)) = app.hits.list_rows.iter().find(|(_, r)| hit(r, col, row)) {
                 app.select(i);
                 app.focus = Focus::Displays;
@@ -265,7 +265,7 @@ fn handle_mouse(app: &mut App, m: MouseEvent) -> Option<Request> {
             } else if let Some(bar) = app.hits.slider.filter(|r| hit(r, col, row)) {
                 app.focus = Focus::Options;
                 app.slider_drag = true;
-                app.set_brightness(slider_percent(bar, row));
+                app.set_slider(slider_fraction(bar, row));
             } else if let Some(&(i, _)) = app.hits.choices.iter().find(|(_, r)| hit(r, col, row)) {
                 app.focus = Focus::Options;
                 app.choose(i);
@@ -279,7 +279,7 @@ fn handle_mouse(app: &mut App, m: MouseEvent) -> Option<Request> {
         }
         MouseEventKind::Drag(MouseButton::Left) if app.slider_drag => {
             if let Some(bar) = app.hits.slider {
-                app.set_brightness(slider_percent(bar, row));
+                app.set_slider(slider_fraction(bar, row));
             }
         }
         MouseEventKind::Drag(MouseButton::Left) => app.drag_to((col, row)),

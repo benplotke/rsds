@@ -53,14 +53,30 @@ impl Profile {
     }
 }
 
+/// `$XDG_CONFIG_HOME/rsds`, defaulting to `~/.config/rsds`.
+pub fn config_dir() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    Some(base.join("rsds"))
+}
+
+/// Write a file atomically: to a temporary file, then rename over the old
+/// one, so readers never see a half-written file.
+pub fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, contents)?;
+    std::fs::rename(&tmp, path)
+}
+
 impl Profiles {
     /// `$XDG_CONFIG_HOME/rsds/profiles.json`, defaulting to `~/.config`.
     pub fn path() -> Option<PathBuf> {
-        let base = std::env::var_os("XDG_CONFIG_HOME")
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-        Some(base.join("rsds").join("profiles.json"))
+        config_dir().map(|d| d.join("profiles.json"))
     }
 
     /// Load the saved profiles. A missing file is an empty set of profiles.
@@ -83,15 +99,8 @@ impl Profiles {
         self.save_to(&path)
     }
 
-    /// Write atomically: to a temporary file, then rename over the old one.
     pub fn save_to(&self, path: &Path) -> io::Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let json = serde_json::to_vec_pretty(self).map_err(io::Error::other)?;
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, json)?;
-        std::fs::rename(&tmp, path)
+        write_atomic(path, &serde_json::to_vec_pretty(self).map_err(io::Error::other)?)
     }
 
     /// The profile for exactly this set of monitors.

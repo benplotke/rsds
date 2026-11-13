@@ -15,6 +15,19 @@ Decisions made during development that aren't in the README.
 - "Primary" is hidden on Wayland (wlroots has no such concept).
 - X11 offers scale via `xrandr --scale`-style transforms, with a note that it isn't true scaling.
 - Nightlight: held by the daemon; fixed-time schedule only; adjustable colour temperature.
+  - Settings in `~/.config/rsds/nightlight.json` (`enabled`, `temperature` in K, `schedule`,
+    `start`/`end` as "HH:MM"). The UI writes it on every change; the daemon watches the
+    directory with inotify and applies changes immediately.
+  - `enabled` is the master switch; with `schedule` on, the tint is only active between
+    `start` and `end` (may wrap past midnight; equal times = all day).
+  - The daemon arms a CLOCK_REALTIME timerfd for the next start/end, so changes happen on
+    time after suspend and clock changes (CANCEL_ON_SET). Local time via libc (DST-aware).
+  - Wayland: wlr-gamma-control on every output, re-applied to outputs connected later.
+    Colour from a black-body approximation (Tanner Helland), 1900–6500 K.
+  - The daemon holds a flock on `$XDG_RUNTIME_DIR/rsds-daemon.lock`; a second daemon
+    refuses to start, and the UI uses it to warn when the daemon isn't running.
+- UI sections: a left-most pane switches between Displays (sections · displays · settings
+  · options) and Nightlight (sections · settings · options).
 - Identify: drawn by the UI process. Wayland: layer-shell + wl_shm buffer, digits drawn
   as simple blocky shapes (no font library). X11: one override-redirect window per monitor.
 - Brightness: logind `SetBrightness` over D-Bus (no root, no udev rules), via the `dbus`

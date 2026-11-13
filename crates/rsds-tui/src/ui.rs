@@ -11,7 +11,7 @@ use ratatui::{
 };
 use rsds_core::layout::Rect as LRect;
 
-use crate::app::{App, Choice, Entry, Focus, Hits, Setting, View};
+use crate::app::{App, Choice, Entry, Focus, Hits, SECTIONS, Section, Setting, View};
 
 // Colours loosely after btop's default theme.
 const FG: Color = Color::Rgb(0xcc, 0xcc, 0xcc);
@@ -23,33 +23,82 @@ const LAYOUT_BOX: Color = Color::Rgb(0x55, 0x6d, 0x59);
 const LIST_BOX: Color = Color::Rgb(0x5c, 0x58, 0x8d);
 const SETTINGS_BOX: Color = Color::Rgb(0x80, 0x52, 0x52);
 const OPTIONS_BOX: Color = Color::Rgb(0x6c, 0x6c, 0x4b);
+const SECTIONS_BOX: Color = Color::Rgb(0x4b, 0x6c, 0x6c);
 const MONITOR: Color = Color::Rgb(0x90, 0x90, 0x90);
 const WARN: Color = Color::Rgb(0xe0, 0xb0, 0x40);
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     app.hits = Hits::default();
-    let list_height = (app.entries.len() as u16 + 2).max(app.settings().len() as u16 + 2);
+    // Keep the bottom height stable when switching sections.
+    let display_settings = 5 + app.backlight.is_some() as usize;
+    let rows = app.entries.len().max(display_settings).max(app.settings().len());
     let [top, bottom, footer] = Layout::vertical([
         Constraint::Min(8),
-        Constraint::Length(list_height),
+        Constraint::Length(rows as u16 + 2),
         Constraint::Length(1),
     ])
     .areas(f.area());
-    let [list, settings, options] = Layout::horizontal([
-        Constraint::Length(40),
-        Constraint::Length(SETTINGS_W),
-        Constraint::Min(20),
-    ])
-    .areas(bottom);
 
     draw_arrangement(f, app, top);
-    draw_list(f, app, list);
-    draw_settings(f, app, settings);
-    draw_options(f, app, options);
-    app.hits.panes = vec![(Focus::Displays, list), (Focus::Settings, settings), (Focus::Options, options)];
+    match app.section {
+        Section::Displays => {
+            let [sections, list, settings, options] = Layout::horizontal([
+                Constraint::Length(SECTIONS_W),
+                Constraint::Length(40),
+                Constraint::Length(SETTINGS_W),
+                Constraint::Min(20),
+            ])
+            .areas(bottom);
+            draw_sections(f, app, sections);
+            draw_list(f, app, list);
+            draw_settings(f, app, settings);
+            draw_options(f, app, options);
+            app.hits.panes = vec![
+                (Focus::Sections, sections),
+                (Focus::Displays, list),
+                (Focus::Settings, settings),
+                (Focus::Options, options),
+            ];
+        }
+        Section::Nightlight => {
+            let [sections, settings, options] = Layout::horizontal([
+                Constraint::Length(SECTIONS_W),
+                Constraint::Length(SETTINGS_W),
+                Constraint::Min(20),
+            ])
+            .areas(bottom);
+            draw_sections(f, app, sections);
+            draw_settings(f, app, settings);
+            draw_options(f, app, options);
+            app.hits.panes =
+                vec![(Focus::Sections, sections), (Focus::Settings, settings), (Focus::Options, options)];
+        }
+    }
     draw_footer(f, app, footer);
     if app.confirm.is_some() {
         draw_confirm(f, app);
+    }
+}
+
+/// Width of the sections pane, borders included.
+const SECTIONS_W: u16 = 15;
+
+fn draw_sections(f: &mut Frame, app: &mut App, area: Rect) {
+    let focused = app.focus == Focus::Sections;
+    let block = boxed("rsds", SECTIONS_BOX, focused);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    for (i, section) in SECTIONS.iter().enumerate() {
+        if i as u16 >= inner.height {
+            break;
+        }
+        let row = Rect { y: inner.y + i as u16, height: 1, ..inner };
+        let mut style = Style::new().fg(FG);
+        if *section == app.section {
+            style = style.bg(if focused { SELECTED_BG } else { UNFOCUSED_BG }).add_modifier(Modifier::BOLD);
+        }
+        f.render_widget(Paragraph::new(pad_to(&format!(" {}", section.label()), row.width)).style(style), row);
+        app.hits.section_rows.push((*section, row));
     }
 }
 
@@ -155,26 +204,27 @@ const SETTINGS_W: u16 = 44;
 
 fn draw_settings(f: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::Settings;
-    let title = match app.selected_entry() {
-        Some(e) => format!("settings: {} {}", e.number, e.live.name),
-        None => "settings".into(),
+    let title = match (app.section, app.selected_entry()) {
+        (Section::Nightlight, _) => "nightlight".into(),
+        (Section::Displays, Some(e)) => format!("settings: {} {}", e.number, e.live.name),
+        (Section::Displays, None) => "settings".into(),
     };
-    let block = boxed(&title, SETTINGS_BOX, focused);
+    let mut block = boxed(&title, SETTINGS_BOX, focused);
+    if app.section == Section::Nightlight && !app.daemon_running {
+        block = block.title(Line::styled(" daemon not running ", Style::new().fg(WARN)).right_aligned());
+    }
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let Some(e) = app.selected_entry() else { return };
 
     const LABEL_W: usize = 14;
     let current = app.current_setting();
-    let brightness = app.brightness();
     let mut rows = Vec::new();
     for (i, setting) in app.settings().into_iter().enumerate() {
         if i as u16 >= inner.height {
             break;
         }
         let row = Rect { y: inner.y + i as u16, height: 1, ..inner };
-        let (label, value) = setting_text(e, setting, brightness);
-        let active = e.pending.enabled || setting == Setting::Enabled;
+        let (label, value, active) = setting_text(app, setting);
         let mut label_style = Style::new().fg(if active { FG } else { INACTIVE });
         let mut value_style = Style::new().fg(if active { TITLE } else { INACTIVE });
         if setting == current {
@@ -196,33 +246,35 @@ fn draw_settings(f: &mut Frame, app: &mut App, area: Rect) {
 fn draw_options(f: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::Options;
     let setting = app.current_setting();
-    let (label, _) = match app.selected_entry() {
-        Some(e) => setting_text(e, setting, None),
-        None => ("", String::new()),
-    };
+    let (label, _, active) = setting_text(app, setting);
     let title = format!("options: {}", label.to_lowercase());
     let block = boxed(&title, OPTIONS_BOX, focused);
     let inner = block.inner(area);
     f.render_widget(block, area);
     let area = Rect { x: inner.x + 1, width: inner.width.saturating_sub(2), ..inner };
-    if setting == Setting::Brightness {
-        draw_slider(f, app, area);
-    } else {
-        draw_choices(f, app, area);
+    match setting {
+        Setting::Brightness => {
+            let Some(p) = app.brightness().filter(|_| active) else { return };
+            draw_slider(f, app, area, p as f64 / 100.0, format!("{p}%"), "brighter", "dimmer");
+        }
+        Setting::Temperature => {
+            let k = app.nightlight.temperature;
+            let fraction = app.temperature_fraction();
+            draw_slider(f, app, area, fraction, format!("{k} K"), "cooler", "warmer");
+        }
+        _ => draw_choices(f, app, area),
     }
 }
 
-/// Brightness slider: a vertical bar on the left of the pane, filled from
-/// the bottom in half-row steps, with the percentage and a key hint beside it.
-fn draw_slider(f: &mut Frame, app: &mut App, area: Rect) {
-    let enabled = app.selected_entry().is_some_and(|e| e.pending.enabled);
-    let Some(percent) = app.brightness().filter(|_| enabled) else { return };
+/// A vertical slider on the left of the pane, filled from the bottom in
+/// half-row steps, with the value and a key hint beside it.
+fn draw_slider(f: &mut Frame, app: &mut App, area: Rect, fraction: f64, value: String, up: &str, down: &str) {
     if area.width < 4 || area.height == 0 {
         return;
     }
     let focused = app.focus == Focus::Options;
     let rows = area.height;
-    let halves = (percent as u32 * rows as u32 * 2 + 50) / 100;
+    let halves = (fraction.clamp(0.0, 1.0) * rows as f64 * 2.0).round() as u32;
     let fill = Style::new().fg(if focused { HI } else { TITLE });
     let empty = Style::new().fg(INACTIVE);
     let bar: Vec<Line> = (0..rows)
@@ -241,15 +293,15 @@ fn draw_slider(f: &mut Frame, app: &mut App, area: Rect) {
     let text_x = area.x + 3;
     let text_w = area.width.saturating_sub(3);
     let mid = area.y + rows.saturating_sub(1) / 2;
-    let value = Span::styled(format!("{percent}%"), Style::new().fg(TITLE).add_modifier(Modifier::BOLD));
+    let value = Span::styled(value, Style::new().fg(TITLE).add_modifier(Modifier::BOLD));
     f.render_widget(Paragraph::new(value), Rect::new(text_x, mid, text_w, 1));
     if mid + 2 < area.bottom() {
         let key = Style::new().fg(HI).add_modifier(Modifier::BOLD);
         let hint = Line::from(vec![
             Span::styled("↑", key),
-            Span::styled(" brighter  ", Style::new().fg(INACTIVE)),
+            Span::styled(format!(" {up}  "), Style::new().fg(INACTIVE)),
             Span::styled("↓", key),
-            Span::styled(" dimmer  · applies immediately", Style::new().fg(INACTIVE)),
+            Span::styled(format!(" {down}  · applies immediately"), Style::new().fg(INACTIVE)),
         ]);
         f.render_widget(Paragraph::new(hint), Rect::new(text_x, mid + 2, text_w, 1));
     }
@@ -258,28 +310,45 @@ fn draw_slider(f: &mut Frame, app: &mut App, area: Rect) {
     app.hits.slider = Some(Rect::new(x, area.y, area.x + 2 - x, rows));
 }
 
-fn setting_text(e: &Entry, s: Setting, brightness: Option<u8>) -> (&'static str, String) {
+/// Label, current value, and whether the setting is currently adjustable.
+fn setting_text(app: &App, s: Setting) -> (&'static str, String, bool) {
+    let n = &app.nightlight;
+    match s {
+        Setting::NightlightEnabled => return ("Nightlight", on_off(n.enabled), true),
+        Setting::Temperature => return ("Temperature", format!("{} K", n.temperature), true),
+        Setting::Schedule => return ("Schedule", on_off(n.schedule), true),
+        Setting::ScheduleStart => return ("Turn on at", n.start.to_string(), n.schedule),
+        Setting::ScheduleEnd => return ("Turn off at", n.end.to_string(), n.schedule),
+        _ => {}
+    }
+    let Some(e) = app.selected_entry() else { return ("", String::new(), false) };
     let on = e.pending.enabled;
     let mode = e.pending.mode.filter(|_| on);
+    let active = on || s == Setting::Enabled;
     let value = match s {
         Setting::Enabled => Some(Choice::Enabled(on)),
         Setting::Brightness => {
-            return ("Brightness", brightness.filter(|_| on).map_or_else(|| "—".into(), |p| format!("{p}%")));
+            let value = app.brightness().filter(|_| on).map_or_else(|| "—".into(), |p| format!("{p}%"));
+            return ("Brightness", value, active);
         }
         Setting::Resolution => mode.map(|m| Choice::Resolution((m.width, m.height))),
         Setting::Refresh => mode.map(Choice::Refresh),
         Setting::Orientation => on.then_some(Choice::Orientation(e.pending.transform)),
         Setting::Scale => on.then_some(Choice::Scale(e.pending.scale)),
+        _ => None,
     };
     let label = match s {
         Setting::Enabled => "Display",
-        Setting::Brightness => "Brightness",
         Setting::Resolution => "Resolution",
         Setting::Refresh => "Refresh rate",
         Setting::Orientation => "Orientation",
-        Setting::Scale => "Scale",
+        _ => "Scale",
     };
-    (label, value.map_or_else(|| "—".into(), |c| c.label(e, false)))
+    (label, value.map_or_else(|| "—".into(), |c| c.label(e, false)), active)
+}
+
+fn on_off(on: bool) -> String {
+    if on { "On" } else { "Off" }.into()
 }
 
 /// All choices for the focused setting, laid out in columns that flow top
