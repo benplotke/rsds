@@ -125,6 +125,24 @@ impl Output {
     }
 }
 
+impl OutputConfig {
+    /// Rectangle in the global layout, if enabled with a mode.
+    pub fn rect(&self) -> Option<crate::layout::Rect> {
+        let mode = self.mode.filter(|_| self.enabled)?;
+        let (w, h) = if self.transform.is_rotated() {
+            (mode.height, mode.width)
+        } else {
+            (mode.width, mode.height)
+        };
+        Some(crate::layout::Rect::new(
+            self.position.0,
+            self.position.1,
+            (w as f64 / self.scale).round() as i32,
+            (h as f64 / self.scale).round() as i32,
+        ))
+    }
+}
+
 /// Desired configuration for one output.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OutputConfig {

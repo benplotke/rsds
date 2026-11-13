@@ -29,19 +29,7 @@ impl Entry {
 
     /// Rectangle in the global layout according to the pending config.
     pub fn rect(&self) -> Option<Rect> {
-        let mode = self.pending.mode.filter(|_| self.pending.enabled)?;
-        let (w, h) = if self.pending.transform.is_rotated() {
-            (mode.height, mode.width)
-        } else {
-            (mode.width, mode.height)
-        };
-        let s = self.pending.scale;
-        Some(Rect::new(
-            self.pending.position.0,
-            self.pending.position.1,
-            (w as f64 / s).round() as i32,
-            (h as f64 / s).round() as i32,
-        ))
+        self.pending.rect()
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -261,6 +249,8 @@ pub enum Request {
     Identify(Vec<(String, usize)>),
     /// Remove the Identify badges.
     EndIdentify,
+    /// Save the live configuration as the profile for this set of monitors.
+    SaveProfile,
 }
 
 /// Screen regions recorded during drawing, for mouse hit testing.
@@ -512,23 +502,15 @@ impl App {
         let centre = anchor
             .map(|r| (r.x + r.w / 2, r.y + r.h / 2))
             .unwrap_or(self.entries[changed].pending.position);
-        let mut placed: Vec<Rect> = anchor.into_iter().collect();
-        let mut rest: Vec<(usize, Rect)> = self
+        let (indices, rects): (Vec<usize>, Vec<Rect>) = self
             .entries
             .iter()
             .enumerate()
             .filter(|(j, _)| *j != changed)
             .filter_map(|(j, e)| e.rect().map(|r| (j, r)))
-            .collect();
-        rest.sort_by_key(|(_, r)| {
-            let dx = (r.x + r.w / 2 - centre.0) as i64;
-            let dy = (r.y + r.h / 2 - centre.1) as i64;
-            dx * dx + dy * dy
-        });
-        for (j, r) in rest {
-            let new = if placed.is_empty() { r } else { layout::snap(r, &placed, 0) };
-            self.entries[j].pending.position = (new.x, new.y);
-            placed.push(new);
+            .unzip();
+        for (j, r) in indices.into_iter().zip(layout::compact(anchor, centre, &rects)) {
+            self.entries[j].pending.position = (r.x, r.y);
         }
         self.normalize();
     }
@@ -603,8 +585,10 @@ impl App {
         self.status = None;
     }
 
-    pub fn keep(&mut self) {
+    /// The user confirmed the new configuration: remember it.
+    pub fn keep(&mut self) -> Request {
         self.confirm = None;
+        Request::SaveProfile
     }
 
     pub fn revert(&mut self) -> Option<Request> {

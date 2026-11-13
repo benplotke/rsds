@@ -20,7 +20,7 @@ use ratatui::{
     },
     layout::{Position, Rect},
 };
-use rsds_core::{Backend, OutputConfig};
+use rsds_core::{Backend, OutputConfig, profile::Profiles};
 use rustix::event::{PollFd, PollFlags, Timespec};
 
 /// Run the UI until the user quits.
@@ -110,6 +110,16 @@ fn perform<B: Backend>(app: &mut App, backend: &mut B, request: Request) {
             backend.end_identify();
             return;
         }
+        Request::SaveProfile => {
+            let saved = Profiles::load().and_then(|mut p| {
+                p.remember(backend.outputs());
+                p.save()
+            });
+            if let Err(e) = saved {
+                app.status = Some(format!("Couldn't save profile: {e}"));
+            }
+            return;
+        }
     };
     let previous: Vec<OutputConfig> = backend.outputs().iter().map(|o| o.config()).collect();
     let mut result = backend.apply(&configs);
@@ -190,8 +200,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<Option<Request>, Flow> {
     if app.confirm.is_some() {
         return Ok(match key.code {
             KeyCode::Enter | KeyCode::Char('k') | KeyCode::Char('y') => {
-                app.keep();
-                None
+                Some(app.keep())
             }
             KeyCode::Esc | KeyCode::Char('n') => app.revert(),
             KeyCode::Char('q') => return Err(Flow::Quit),
@@ -240,7 +249,7 @@ fn handle_mouse(app: &mut App, m: MouseEvent) -> Option<Request> {
     if app.confirm.is_some() {
         if m.kind == MouseEventKind::Down(MouseButton::Left) {
             if app.hits.keep.is_some_and(|r| hit(&r, col, row)) {
-                app.keep();
+                return Some(app.keep());
             } else if app.hits.revert.is_some_and(|r| hit(&r, col, row)) {
                 return app.revert();
             }

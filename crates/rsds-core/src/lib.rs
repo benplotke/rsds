@@ -3,6 +3,7 @@
 pub mod badge;
 pub mod layout;
 pub mod output;
+pub mod profile;
 
 pub use output::{Mode, Output, OutputConfig, Transform};
 

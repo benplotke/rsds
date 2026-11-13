@@ -576,6 +576,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsds-daemon"
+version = "0.1.0"
+dependencies = [
+ "rsds-core",
+ "rustix",
+]
+
+[[package]]
 name = "rsds-tui"
 version = "0.1.0"
 dependencies = [
@@ -588,6 +596,7 @@ dependencies = [
 name = "rsds-w"
 version = "0.1.0"
 dependencies = [
+ "rsds-daemon",
  "rsds-tui",
  "rsds-wayland",
 ]

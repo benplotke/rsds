@@ -24,9 +24,22 @@ Decisions made during development that aren't in the README.
 - Monitor identity in profiles: EDID make|model|serial; falls back to connector name when
   there is no serial.
 
+## Daemon (`rsds-w daemon`)
+- Reacts only when the *set* of connected monitors changes (by identity), and once at startup.
+  Ordinary configuration changes (from the UI, wlr-randr, …) are ignored.
+- A profile is saved only when the user presses Keep in the UI. The daemon never saves.
+- Saved profile for the current set → apply it (also at startup).
+- No profile:
+  - new monitors are turned on at their preferred mode and placed right of the rightmost
+    existing monitor, top-aligned with it; existing monitors are untouched;
+  - when monitors were removed, the remaining ones slide together to close gaps;
+  - if every monitor would be off, all are turned on at their preferred mode;
+  - at startup, nothing is changed.
+
 ## Crates
-- `rsds-core`: model, layout geometry (snapping), `Backend` trait.
+- `rsds-core`: model, layout geometry (snapping, compaction), profiles, Identify badge, `Backend` trait.
 - `rsds-wayland`: wlroots backend.
 - `rsds-tui`: ratatui UI, generic over `Backend`.
+- `rsds-daemon`: hotplug/profile service, generic over `Backend`.
 - `rsds-w`: Wayland binary.
 - (to come) `rsds-x11`, `rsds-x`.

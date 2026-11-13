@@ -103,6 +103,37 @@ fn align(pos: i32, len: i32, others: &[Rect], threshold: i32, horizontal: bool, 
     best.map_or(pos, |(_, c)| c)
 }
 
+/// Rearrange `rects` so none overlap and none float detached from the
+/// group. `fixed` (if any) stays where it is; the others are placed in order
+/// of distance from `centre`, each snapped to the ones already placed.
+/// Returns the new rects in the same order as `rects`.
+pub fn compact(fixed: Option<Rect>, centre: (i32, i32), rects: &[Rect]) -> Vec<Rect> {
+    let mut order: Vec<usize> = (0..rects.len()).collect();
+    order.sort_by_key(|&i| {
+        let r = rects[i];
+        let dx = (r.x + r.w / 2 - centre.0) as i64;
+        let dy = (r.y + r.h / 2 - centre.1) as i64;
+        dx * dx + dy * dy
+    });
+    let mut placed: Vec<Rect> = fixed.into_iter().collect();
+    let mut out = rects.to_vec();
+    for i in order {
+        let new = if placed.is_empty() { rects[i] } else { snap(rects[i], &placed, 0) };
+        out[i] = new;
+        placed.push(new);
+    }
+    out
+}
+
+/// Position for a new rect to the right of all of `existing`,
+/// top-aligned with the rightmost one.
+pub fn place_right(existing: &[Rect]) -> (i32, i32) {
+    match existing.iter().max_by_key(|r| (r.right(), -r.y)) {
+        Some(r) => (r.right(), r.y),
+        None => (0, 0),
+    }
+}
+
 /// Offset that moves the top-left of the bounding box of `rects` to (0, 0).
 pub fn normalize_offset(rects: &[Rect]) -> (i32, i32) {
     let x = rects.iter().map(|r| r.x).min().unwrap_or(0);
@@ -161,6 +192,18 @@ mod tests {
         let others = [r(0, 0, FHD)];
         let got = snap(r(10, 1200, FHD), &others, 50);
         assert_eq!(got, r(0, 1080, FHD));
+    }
+
+    #[test]
+    fn compact_closes_gap() {
+        let got = compact(None, (0, 0), &[r(0, 0, FHD), r(3840, 0, FHD)]);
+        assert_eq!(got, vec![r(0, 0, FHD), r(1920, 0, FHD)]);
+    }
+
+    #[test]
+    fn place_right_of_rightmost() {
+        assert_eq!(place_right(&[r(0, 0, FHD), r(1920, 200, FHD)]), (3840, 200));
+        assert_eq!(place_right(&[]), (0, 0));
     }
 
     #[test]
