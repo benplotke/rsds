@@ -7,6 +7,11 @@ Decisions made during development that aren't in the README.
 - Talk to the display server protocols directly (`wayland-client`, `x11rb`) rather than
   shelling out to `wlr-randr`/`xrandr`: the daemon needs a live connection anyway for
   hotplug events and (on Wayland) to hold the Nightlight gamma ramp.
+- Wayland apply: if the compositor rejects a configuration, it is retried one output at a
+  time (turn-offs first, rejected steps retried after the others), restoring the original
+  if it can't be reached. Labwc checks each output of a request against the current state
+  of the others, so freeing display bandwidth on one monitor and using it on another only
+  works in steps (e.g. two 4K monitors on one MST dock).
 - One binary per package; the daemon is a subcommand. Unused UI code is never paged in,
   so a single binary costs the daemon essentially no memory.
 - The UI is launched from a terminal (no `.desktop` file).

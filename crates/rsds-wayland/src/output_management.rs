@@ -142,7 +142,10 @@ impl Backend for WaylandBackend {
     }
 
     fn apply(&mut self, config: &[OutputConfig]) -> Result<(), Error> {
-        self.submit(config, false)
+        match self.submit(config, false) {
+            Err(Error::Rejected) => self.apply_stepwise(config),
+            r => r,
+        }
     }
 
     fn test(&mut self, config: &[OutputConfig]) -> Result<(), Error> {
@@ -165,6 +168,60 @@ impl Backend for WaylandBackend {
 }
 
 impl WaylandBackend {
+    /// Apply a rejected configuration one output at a time.
+    ///
+    /// Labwc checks each output of a request on its own against the
+    /// *current* state of the others, so a request that frees display
+    /// bandwidth on one output (lower mode, turn off) to make room on
+    /// another (turn on, higher mode) is rejected as a whole even though
+    /// it works when done in steps. Outputs being turned off go first;
+    /// changes that are still rejected are retried after the others.
+    /// If the configuration can't be reached, the original is restored.
+    fn apply_stepwise(&mut self, config: &[OutputConfig]) -> Result<(), Error> {
+        let original: Vec<OutputConfig> = self.state.outputs.iter().map(Output::config).collect();
+        let result = self.apply_each(config);
+        if result.is_err() {
+            let _ = self.apply_each(&original);
+        }
+        result
+    }
+
+    fn apply_each(&mut self, config: &[OutputConfig]) -> Result<(), Error> {
+        let mut pending: Vec<&OutputConfig> = config
+            .iter()
+            .filter(|c| {
+                self.state.outputs.iter().find(|o| o.name == c.name).is_some_and(|o| {
+                    let current = o.config();
+                    (c.enabled || current.enabled) && **c != current
+                })
+            })
+            .collect();
+        pending.sort_by_key(|c| c.enabled);
+
+        while !pending.is_empty() {
+            let mut progress = false;
+            let mut i = 0;
+            while i < pending.len() {
+                match self.submit(std::slice::from_ref(pending[i]), false) {
+                    Ok(()) => {
+                        // Pick up the new state and serial before the next step.
+                        self.queue
+                            .roundtrip(&mut self.state)
+                            .map_err(Self::connection_error)?;
+                        pending.remove(i);
+                        progress = true;
+                    }
+                    Err(Error::Rejected) => i += 1,
+                    Err(e) => return Err(e),
+                }
+            }
+            if !progress {
+                return Err(Error::Rejected);
+            }
+        }
+        Ok(())
+    }
+
     /// Send a configuration to the compositor, either applying it or only
     /// asking whether it would be accepted.
     fn submit(&mut self, config: &[OutputConfig], test_only: bool) -> Result<(), Error> {
