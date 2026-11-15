@@ -669,6 +669,7 @@ impl App {
             return;
         }
         let i = self.selected;
+        let before = self.entries[i].rect();
         let e = &mut self.entries[i];
         match choice {
             Choice::Enabled(on) => {
@@ -701,7 +702,7 @@ impl App {
             Choice::Scale(scale) => e.pending.scale = scale,
             Choice::Time(_) => return,
         }
-        self.fixup_layout(i);
+        self.fixup_layout(i, before);
     }
 
     pub fn toggle_enabled(&mut self) {
@@ -728,7 +729,7 @@ impl App {
             let y = others.iter().map(|r| r.y).min().unwrap_or(0);
             self.entries[i].pending.position = (x, y);
         }
-        self.fixup_layout(i);
+        self.fixup_layout(i, None);
     }
 
     /// Enabled monitor rects other than `index`.
@@ -742,20 +743,28 @@ impl App {
     }
 
     /// After monitor `changed` changed size or was turned on/off, move the
-    /// others so nothing overlaps and nothing floats detached.
-    fn fixup_layout(&mut self, changed: usize) {
+    /// others so nothing overlaps and nothing floats detached. `before` is
+    /// its rect before a resize, so its neighbours can follow its edges.
+    fn fixup_layout(&mut self, changed: usize, before: Option<Rect>) {
         let anchor = self.entries[changed].rect();
         let centre = anchor
             .map(|r| (r.x + r.w / 2, r.y + r.h / 2))
             .unwrap_or(self.entries[changed].pending.position);
-        let (indices, rects): (Vec<usize>, Vec<Rect>) = self
+        let (indices, mut rects): (Vec<usize>, Vec<Rect>) = self
             .entries
             .iter()
             .enumerate()
             .filter(|(j, _)| *j != changed)
             .filter_map(|(j, e)| e.rect().map(|r| (j, r)))
             .unzip();
-        for (j, r) in indices.into_iter().zip(layout::compact(anchor, centre, &rects)) {
+        if let (Some(old), Some(new)) = (before, anchor) {
+            layout::follow_resize(old, new, &mut rects);
+        }
+        let all: Vec<Rect> = anchor.into_iter().chain(rects.iter().copied()).collect();
+        if !layout::is_valid(&all) {
+            rects = layout::compact(anchor, centre, &rects);
+        }
+        for (j, r) in indices.into_iter().zip(rects) {
             self.entries[j].pending.position = (r.x, r.y);
         }
         self.normalize();
@@ -808,7 +817,7 @@ impl App {
         let threshold = view.map_or(0, |v| (v.px_per_col * 2.0) as i32);
         let snapped = layout::snap(rect, &self.other_rects(d.index), threshold);
         self.entries[d.index].pending.position = (snapped.x, snapped.y);
-        self.fixup_layout(d.index);
+        self.fixup_layout(d.index, None);
     }
 
     /// Discard unapplied edits.
