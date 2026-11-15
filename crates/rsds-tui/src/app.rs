@@ -264,6 +264,8 @@ impl View {
     }
 
     /// Terminal cell rectangle for a layout rect, clipped to the view area.
+    /// It includes the cells at both its start and end edges, so rects
+    /// that share an edge share a row or column of cells there.
     pub fn to_cells(self, r: Rect) -> ratatui::layout::Rect {
         let x0 = ((r.x as f64 - self.origin.0) / self.px_per_col).round();
         let y0 = ((r.y as f64 - self.origin.1) / (self.px_per_col * Self::ROW_ASPECT)).round();
@@ -272,7 +274,8 @@ impl View {
         let a = self.area;
         let clamp_x = |v: f64| (v.max(0.0) as u16).min(a.width) + a.x;
         let clamp_y = |v: f64| (v.max(0.0) as u16).min(a.height) + a.y;
-        let (cx0, cy0, cx1, cy1) = (clamp_x(x0), clamp_y(y0), clamp_x(x1), clamp_y(y1));
+        let (cx0, cy0) = (clamp_x(x0), clamp_y(y0));
+        let (cx1, cy1) = (clamp_x(x1 + 1.0), clamp_y(y1 + 1.0));
         ratatui::layout::Rect::new(cx0, cy0, cx1 - cx0, cy1 - cy0)
     }
 

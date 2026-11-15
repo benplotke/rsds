@@ -132,7 +132,13 @@ fn draw_arrangement(f: &mut Frame, app: &mut App, area: Rect) {
     };
     app.view = Some(view);
 
-    // Draw the selected monitor last so it is on top while dragging.
+    // Monitor borders go on one grid so neighbours share a single line,
+    // drawn heavy where they join. A monitor being dragged may overlap the
+    // others, so it is drawn on top as its own box instead.
+    let dragged = app.drag.as_ref().map(|d| d.index);
+    let mut grid = BorderGrid::default();
+    let mut boxes = Vec::new();
+    // The selected monitor goes last so it wins clicks on shared edges.
     let mut order: Vec<usize> = (0..app.entries.len()).filter(|&i| i != app.selected).collect();
     order.push(app.selected);
     for i in order {
@@ -142,20 +148,28 @@ fn draw_arrangement(f: &mut Frame, app: &mut App, area: Rect) {
         if cells.width < 3 || cells.height < 3 {
             continue;
         }
-        let selected = i == app.selected;
-        let border = if app.drag.as_ref().is_some_and(|d| d.index == i) {
-            WARN
-        } else if selected {
-            HI
+        if Some(i) != dragged {
+            let selected = i == app.selected;
+            let (color, rank) = if selected { (HI, 1) } else { (MONITOR, 0) };
+            grid.add(cells, if selected { 2 } else { 1 }, color, rank);
+        }
+        boxes.push((i, cells));
+    }
+    grid.render(f.buffer_mut());
+
+    for (i, cells) in boxes {
+        let e = &app.entries[i];
+        let body = if Some(i) == dragged {
+            let block = Block::bordered()
+                .border_type(if i == app.selected { BorderType::Thick } else { BorderType::Rounded })
+                .border_style(Style::new().fg(WARN));
+            let body = block.inner(cells);
+            f.render_widget(Clear, cells);
+            f.render_widget(block, cells);
+            body
         } else {
-            MONITOR
+            Rect::new(cells.x + 1, cells.y + 1, cells.width - 2, cells.height - 2)
         };
-        let block = Block::bordered()
-            .border_type(if selected { BorderType::Thick } else { BorderType::Rounded })
-            .border_style(Style::new().fg(border));
-        let body = block.inner(cells);
-        f.render_widget(Clear, cells);
-        f.render_widget(block, cells);
 
         let mut lines = vec![
             Line::styled(e.number.to_string(), Style::new().fg(TITLE).add_modifier(Modifier::BOLD)),
@@ -169,6 +183,78 @@ fn draw_arrangement(f: &mut Frame, app: &mut App, area: Rect) {
         let text_area = Rect { y: body.y + pad, height: body.height - pad, ..body };
         f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), text_area);
         app.hits.monitors.push((i, cells));
+    }
+}
+
+/// Box-drawing glyphs indexed by arm weights (0 none, 1 light, 2 heavy) as
+/// `up * 27 + down * 9 + left * 3 + right`.
+const GLYPHS: &str = " ╶╺╴─╼╸╾━╷┌┍┐┬┮┑┭┯╻┎┏┒┰┲┓┱┳╵└┕┘┴┶┙┵┷│├┝┤┼┾┥┽┿╽┟┢┧╁╆┪╅╈╹┖┗┚┸┺┛┹┻╿┞┡┦╀╄┩╃╇┃┠┣┨╂╊┫╉╋";
+
+/// One cell of a [`BorderGrid`].
+#[derive(Default)]
+struct Junction {
+    /// Weights of the up, down, left and right arms.
+    arms: [u8; 4],
+    color: Option<(u8, Color)>,
+}
+
+/// Borders of several boxes drawn as one set of lines, so boxes sharing an
+/// edge share a line, which is heavy where they meet.
+#[derive(Default)]
+struct BorderGrid {
+    cells: std::collections::HashMap<(u16, u16), Junction>,
+}
+
+impl BorderGrid {
+    /// Add the border of `r` with line `weight`. Where borders cross, the
+    /// colour with the highest `rank` wins.
+    fn add(&mut self, r: Rect, weight: u8, color: Color, rank: u8) {
+        let (x0, y0, x1, y1) = (r.x, r.y, r.right() - 1, r.bottom() - 1);
+        let mut arm = |x: u16, y: u16, a: usize| {
+            let j = self.cells.entry((x, y)).or_default();
+            j.arms[a] = if j.arms[a] > 0 { 2 } else { weight };
+            if j.color.is_none_or(|(k, _)| rank >= k) {
+                j.color = Some((rank, color));
+            }
+        };
+        for x in x0..=x1 {
+            for y in [y0, y1] {
+                if x > x0 {
+                    arm(x, y, 2);
+                }
+                if x < x1 {
+                    arm(x, y, 3);
+                }
+            }
+        }
+        for y in y0..=y1 {
+            for x in [x0, x1] {
+                if y > y0 {
+                    arm(x, y, 0);
+                }
+                if y < y1 {
+                    arm(x, y, 1);
+                }
+            }
+        }
+    }
+
+    fn render(&self, buf: &mut ratatui::buffer::Buffer) {
+        for (&(x, y), j) in &self.cells {
+            let [u, d, l, r] = j.arms;
+            let glyph = match j.arms {
+                // Plain corners keep the rounded look of the other boxes.
+                [0, 1, 0, 1] => '╭',
+                [0, 1, 1, 0] => '╮',
+                [1, 0, 0, 1] => '╰',
+                [1, 0, 1, 0] => '╯',
+                _ => GLYPHS.chars().nth((u * 27 + d * 9 + l * 3 + r) as usize).unwrap_or(' '),
+            };
+            let color = j.color.map_or(MONITOR, |(_, c)| c);
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_char(glyph).set_fg(color);
+            }
+        }
     }
 }
 
