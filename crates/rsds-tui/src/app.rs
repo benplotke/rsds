@@ -136,8 +136,42 @@ const NIGHTLIGHT_SETTINGS: [Setting; 5] = [
 
 /// Colour temperature step for keys and the scroll wheel, in kelvin.
 pub const TEMPERATURE_STEP: u32 = 100;
-/// Granularity of the schedule's times, in minutes.
-const TIME_STEP: u16 = 15;
+/// Minute step of the schedule's time picker.
+pub const MINUTE_STEP: u16 = 5;
+
+/// Column of the schedule's time picker in the options pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeColumn {
+    Hour,
+    Minute,
+}
+
+impl TimeColumn {
+    /// Largest value of this column.
+    fn max(self) -> u16 {
+        match self {
+            TimeColumn::Hour => 23,
+            TimeColumn::Minute => 59,
+        }
+    }
+}
+
+/// The hour `steps` hours after `h`, wrapping round the day.
+pub fn step_hour(h: u16, steps: i32) -> u16 {
+    (h as i32 + steps).rem_euclid(24) as u16
+}
+
+/// The minute `steps` [`MINUTE_STEP`]s after `m`, wrapping round the hour.
+/// A minute off the step grid first moves to the grid in that direction.
+pub fn step_minute(m: u16, steps: i32) -> u16 {
+    let (m, s) = (m as i32, MINUTE_STEP as i32);
+    let on_grid = match steps.signum() {
+        0 => return m as u16,
+        1 => m.div_euclid(s) * s,
+        _ => (m + s - 1).div_euclid(s) * s,
+    };
+    (on_grid + steps * s).rem_euclid(60) as u16
+}
 
 const DISPLAY_SETTINGS: [Setting; 5] = [
     Setting::Enabled,
@@ -178,7 +212,6 @@ pub enum Choice {
     Refresh(Mode),
     Orientation(Transform),
     Scale(f64),
-    Time(TimeOfDay),
 }
 
 impl Choice {
@@ -190,7 +223,6 @@ impl Choice {
             Choice::Refresh(r) => mode.is_some_and(|m| m.same_as(&r)),
             Choice::Orientation(t) => t == e.pending.transform,
             Choice::Scale(s) => (s - e.pending.scale).abs() < 1e-6,
-            Choice::Time(_) => false,
         }
     }
 
@@ -216,7 +248,6 @@ impl Choice {
             Choice::Refresh(m) => format!("{:.3} Hz{rec}", m.refresh_hz()),
             Choice::Orientation(t) => orientation_label(t).into(),
             Choice::Scale(s) => format!("{}%", (s * 100.0).round()),
-            Choice::Time(t) => t.to_string(),
         }
     }
 }
@@ -327,6 +358,8 @@ pub struct Hits {
     pub slider: Option<ratatui::layout::Rect>,
     /// (choice index, cell) in the options panel.
     pub choices: Vec<(usize, ratatui::layout::Rect)>,
+    /// (column, value, cell) of the times shown in the time picker.
+    pub times: Vec<(TimeColumn, u16, ratatui::layout::Rect)>,
     pub apply: Option<ratatui::layout::Rect>,
     pub reset: Option<ratatui::layout::Rect>,
     pub keep: Option<ratatui::layout::Rect>,
@@ -344,6 +377,10 @@ pub struct App {
     /// Whether the daemon (which applies Nightlight) is running.
     pub daemon_running: bool,
     pub setting: Setting,
+    /// Column of the schedule's time picker that up/down and typing change.
+    pub time_column: TimeColumn,
+    /// Digits typed so far into the time picker's column.
+    typed_digits: u8,
     pub drag: Option<Drag>,
     /// The mouse is dragging the brightness slider.
     pub slider_drag: bool,
@@ -378,6 +415,8 @@ impl App {
             nightlight: Nightlight::default(),
             daemon_running: false,
             setting: Setting::Enabled,
+            time_column: TimeColumn::Hour,
+            typed_digits: 0,
             drag: None,
             slider_drag: false,
             frozen_view: None,
@@ -492,17 +531,98 @@ impl App {
     }
 
     /// Move focus one pane right (`delta` 1) or left (-1), without wrapping.
+    /// In the time picker, first moves between its hour and minute columns.
     pub fn move_focus(&mut self, delta: i32) {
+        if self.time_picker_focused() {
+            match (self.time_column, delta.signum()) {
+                (TimeColumn::Hour, 1) => return self.time_column = TimeColumn::Minute,
+                (TimeColumn::Minute, -1) => return self.time_column = TimeColumn::Hour,
+                (TimeColumn::Minute, 1) => return,
+                _ => {}
+            }
+        }
         let panes = self.section.panes();
         let i = panes.iter().position(|p| *p == self.focus).unwrap_or(0) as i32;
-        self.focus = panes[(i + delta).clamp(0, panes.len() as i32 - 1) as usize];
+        self.set_focus(panes[(i + delta).clamp(0, panes.len() as i32 - 1) as usize]);
     }
 
     /// Cycle focus through the section's panes (Tab / Shift+Tab).
     pub fn cycle_focus(&mut self, delta: i32) {
         let panes = self.section.panes();
         let i = panes.iter().position(|p| *p == self.focus).unwrap_or(0) as i32;
-        self.focus = panes[(i + delta).rem_euclid(panes.len() as i32) as usize];
+        self.set_focus(panes[(i + delta).rem_euclid(panes.len() as i32) as usize]);
+    }
+
+    /// Focus `pane`; entering the options pane starts at the time picker's
+    /// hour column.
+    fn set_focus(&mut self, pane: Focus) {
+        if pane == Focus::Options && self.focus != Focus::Options {
+            self.time_column = TimeColumn::Hour;
+        }
+        self.focus = pane;
+    }
+
+    /// Whether the options pane shows the schedule's time picker.
+    pub fn shows_time_picker(&self) -> bool {
+        self.section == Section::Nightlight
+            && matches!(self.current_setting(), Setting::ScheduleStart | Setting::ScheduleEnd)
+    }
+
+    fn time_picker_focused(&self) -> bool {
+        self.focus == Focus::Options && self.shows_time_picker()
+    }
+
+    /// The schedule time the time picker shows.
+    pub fn picker_time(&self) -> TimeOfDay {
+        match self.current_setting() {
+            Setting::ScheduleEnd => self.nightlight.end,
+            _ => self.nightlight.start,
+        }
+    }
+
+    /// Set one column of the time picker's time, clamped to its largest
+    /// value, and save it.
+    pub fn set_time_part(&mut self, column: TimeColumn, value: u16) {
+        let t = self.picker_time();
+        let (h, m) = match column {
+            TimeColumn::Hour => (value.min(23), t.minute()),
+            TimeColumn::Minute => (t.hour(), value.min(59)),
+        };
+        let t = TimeOfDay(h * 60 + m);
+        match self.current_setting() {
+            Setting::ScheduleStart => self.nightlight.start = t,
+            Setting::ScheduleEnd => self.nightlight.end = t,
+            _ => return,
+        }
+        self.save_nightlight();
+    }
+
+    /// A digit typed in the time picker. Two digits fill a column (too
+    /// large a value becomes the largest valid one); after the hour, typing
+    /// continues in the minute column.
+    pub fn type_digit(&mut self, digit: u16) {
+        if !self.time_picker_focused() {
+            return;
+        }
+        let column = self.time_column;
+        let value = if self.typed_digits == 0 {
+            digit
+        } else {
+            let t = self.picker_time();
+            let first = if column == TimeColumn::Hour { t.hour() } else { t.minute() };
+            first * 10 + digit
+        };
+        self.set_time_part(column, value.min(column.max()));
+        self.typed_digits += 1;
+        if self.typed_digits == 2 {
+            self.typed_digits = 0;
+            self.time_column = TimeColumn::Minute;
+        }
+    }
+
+    /// Anything other than a digit ends typing into the time picker.
+    pub fn end_typing(&mut self) {
+        self.typed_digits = 0;
     }
 
     /// Settings shown in the settings pane: for the selected monitor, or
@@ -588,22 +708,11 @@ impl App {
     fn nightlight_choices(&self) -> (Vec<Choice>, Option<usize>) {
         let n = &self.nightlight;
         let on_off = |v: bool| (vec![Choice::Enabled(true), Choice::Enabled(false)], Some(if v { 0 } else { 1 }));
-        let times = |current: TimeOfDay| {
-            let mut v: Vec<TimeOfDay> =
-                (0..TimeOfDay::MINUTES_PER_DAY).step_by(TIME_STEP as usize).map(TimeOfDay).collect();
-            if !v.contains(&current) {
-                v.push(current);
-                v.sort();
-            }
-            let i = v.iter().position(|t| *t == current);
-            (v.into_iter().map(Choice::Time).collect(), i)
-        };
         match self.current_setting() {
             Setting::NightlightEnabled => on_off(n.enabled),
             Setting::Schedule => on_off(n.schedule),
-            Setting::ScheduleStart => times(n.start),
-            Setting::ScheduleEnd => times(n.end),
-            _ => (Vec::new(), None), // Temperature is a slider.
+            // Temperature is a slider; the times have their own picker.
+            _ => (Vec::new(), None),
         }
     }
 
@@ -636,6 +745,15 @@ impl App {
             }
             return;
         }
+        if self.shows_time_picker() {
+            let t = self.picker_time();
+            let (column, value) = match self.time_column {
+                TimeColumn::Hour => (TimeColumn::Hour, step_hour(t.hour(), delta)),
+                TimeColumn::Minute => (TimeColumn::Minute, step_minute(t.minute(), delta)),
+            };
+            self.set_time_part(column, value);
+            return;
+        }
         if self.current_setting() == Setting::Temperature {
             // Up (negative delta) is a higher temperature: cooler, less tint.
             let k = self.nightlight.temperature as i64 - delta as i64 * TEMPERATURE_STEP as i64;
@@ -664,8 +782,6 @@ impl App {
             match (setting, choice) {
                 (Setting::NightlightEnabled, Choice::Enabled(on)) => n.enabled = on,
                 (Setting::Schedule, Choice::Enabled(on)) => n.schedule = on,
-                (Setting::ScheduleStart, Choice::Time(t)) => n.start = t,
-                (Setting::ScheduleEnd, Choice::Time(t)) => n.end = t,
                 _ => return,
             }
             self.save_nightlight();
@@ -703,7 +819,6 @@ impl App {
             }
             Choice::Orientation(t) => e.pending.transform = t,
             Choice::Scale(scale) => e.pending.scale = scale,
-            Choice::Time(_) => return,
         }
         self.fixup_layout(i, before);
     }
@@ -915,4 +1030,26 @@ fn natural_key(s: &str) -> Vec<(String, u64)> {
     }
     out.push((text, num.unwrap_or(0)));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hours_wrap() {
+        assert_eq!(step_hour(23, 1), 0);
+        assert_eq!(step_hour(0, -2), 22);
+        assert_eq!(step_hour(12, 0), 12);
+    }
+
+    #[test]
+    fn minutes_step_on_grid_and_wrap() {
+        assert_eq!(step_minute(55, 1), 0);
+        assert_eq!(step_minute(0, -1), 55);
+        assert_eq!(step_minute(7, 1), 10);
+        assert_eq!(step_minute(7, -1), 5);
+        assert_eq!(step_minute(7, -2), 0);
+        assert_eq!(step_minute(7, 0), 7);
+    }
 }

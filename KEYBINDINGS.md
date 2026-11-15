@@ -28,7 +28,18 @@ takes effect immediately. It is not part of Apply, Reset or the revert countdown
 **Nightlight** settings also take effect immediately (they are saved and applied
 by the daemon, `rsds-w daemon`, which must be running). Its temperature is a
 slider: `↑` cooler (less tint), `↓` warmer, in 100 K steps from 1900 K to 6500 K.
-The schedule's times are chosen in 15-minute steps.
+
+The schedule's times use a picker with an hour column and a minute column:
+
+| Key | Hour column | Minute column |
+|---|---|---|
+| `↑` / `k` | one hour earlier | five minutes earlier |
+| `↓` / `j` | one hour later | five minutes later |
+| `→` / `l` / `Enter` | go to the minute column | — |
+| `←` / `h` | go to settings | go to the hour column |
+| `0`–`9` | type the hour; after two digits typing continues in the minute column | type the minutes |
+
+A typed value that is too large becomes the largest valid one (23 or 59).
 
 ## Actions
 
@@ -57,7 +68,7 @@ Shown after applying. Reverts automatically after 15 seconds.
 | Click a monitor or a row in the displays pane | Select that monitor |
 | Click a section | Switch to that section |
 | Click a setting | Select that setting |
-| Click an option | Choose that option |
+| Click an option | Choose that option (in the time picker, that hour or minute) |
 | Click or drag on a slider | Set brightness or temperature to that point |
 | Scroll wheel over a pane | Same as `↑` / `↓` in that pane |
 | Click **Apply** / **Reset** / **Identify** | Same as `a` / `r` / `i` |

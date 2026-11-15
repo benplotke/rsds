@@ -209,6 +209,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<Option<Request>, Flow> {
         });
     }
     match key.code {
+        KeyCode::Char(c @ '0'..='9') => {
+            app.type_digit(c as u16 - '0' as u16);
+            return Ok(None);
+        }
+        _ => app.end_typing(),
+    }
+    match key.code {
         KeyCode::Char('q') => return Err(Flow::Quit),
         KeyCode::Char('a') => return Ok(app.apply()),
         KeyCode::Char('r') => app.reset(),
@@ -248,6 +255,9 @@ fn handle_mouse(app: &mut App, m: MouseEvent) -> Option<Request> {
         }
         return None;
     }
+    if m.kind != MouseEventKind::Moved {
+        app.end_typing();
+    }
     match m.kind {
         MouseEventKind::Down(MouseButton::Left) => {
             // Monitors drawn last are on top, so search in reverse.
@@ -266,6 +276,10 @@ fn handle_mouse(app: &mut App, m: MouseEvent) -> Option<Request> {
                 app.focus = Focus::Options;
                 app.slider_drag = true;
                 app.set_slider(slider_fraction(bar, row));
+            } else if let Some(&(column, value, _)) = app.hits.times.iter().find(|(_, _, r)| hit(r, col, row)) {
+                app.focus = Focus::Options;
+                app.time_column = column;
+                app.set_time_part(column, value);
             } else if let Some(&(i, _)) = app.hits.choices.iter().find(|(_, r)| hit(r, col, row)) {
                 app.focus = Focus::Options;
                 app.choose(i);

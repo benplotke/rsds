@@ -11,7 +11,7 @@ use ratatui::{
 };
 use rsds_core::layout::Rect as LRect;
 
-use crate::app::{App, Choice, Entry, Focus, Hits, SECTIONS, Section, Setting, View};
+use crate::app::{self, App, Choice, Entry, Focus, Hits, SECTIONS, Section, Setting, TimeColumn, View};
 
 // Colours loosely after btop's default theme.
 const FG: Color = Color::Rgb(0xcc, 0xcc, 0xcc);
@@ -31,7 +31,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     app.hits = Hits::default();
     // Keep the bottom height stable when switching sections.
     let display_settings = 5 + app.backlight.is_some() as usize;
-    let rows = app.entries.len().max(display_settings).max(app.settings().len());
+    // Odd, so the time picker's current row can sit exactly in the middle.
+    let rows = app.entries.len().max(display_settings).max(app.settings().len()) | 1;
     let [top, bottom, footer] = Layout::vertical([
         Constraint::Min(8),
         Constraint::Length(rows as u16 + 2),
@@ -348,8 +349,52 @@ fn draw_options(f: &mut Frame, app: &mut App, area: Rect) {
             let fraction = app.temperature_fraction();
             draw_slider(f, app, area, fraction, format!("{k} K"), "cooler", "warmer");
         }
+        Setting::ScheduleStart | Setting::ScheduleEnd => draw_time_picker(f, app, area),
         _ => draw_choices(f, app, area),
     }
+}
+
+/// Colours of the time picker's values by distance from the current one.
+const TIME_FADE: [Color; 3] = [TITLE, Color::Rgb(0x8a, 0x8a, 0x8a), Color::Rgb(0x4a, 0x4a, 0x4a)];
+
+/// Hour and minute columns with the current time centred and its
+/// neighbours fading out above and below.
+fn draw_time_picker(f: &mut Frame, app: &mut App, area: Rect) {
+    const CELL_W: u16 = 4;
+    if area.width < CELL_W * 2 + 1 || area.height == 0 {
+        return;
+    }
+    let t = app.picker_time();
+    let focused = app.focus == Focus::Options;
+    let mid = area.y + (area.height - 1) / 2;
+    let mut hits = Vec::new();
+    let columns = [
+        (TimeColumn::Hour, area.x, t.hour()),
+        (TimeColumn::Minute, area.x + CELL_W + 1, t.minute()),
+    ];
+    for (column, x, current) in columns {
+        for offset in -2i32..=2 {
+            let y = mid as i32 + offset;
+            if y < area.y as i32 || y >= area.bottom() as i32 {
+                continue;
+            }
+            let value = match column {
+                TimeColumn::Hour => app::step_hour(current, offset),
+                TimeColumn::Minute => app::step_minute(current, offset),
+            };
+            let mut style = Style::new().fg(TIME_FADE[offset.unsigned_abs() as usize]);
+            if offset == 0 {
+                let bg = if focused && app.time_column == column { SELECTED_BG } else { UNFOCUSED_BG };
+                style = style.bg(bg).add_modifier(Modifier::BOLD);
+            }
+            let cell = Rect::new(x, y as u16, CELL_W, 1);
+            f.render_widget(Paragraph::new(Span::styled(format!(" {value:02} "), style)), cell);
+            hits.push((column, value, cell));
+        }
+    }
+    let colon = Span::styled(":", Style::new().fg(TITLE).add_modifier(Modifier::BOLD));
+    f.render_widget(Paragraph::new(colon), Rect::new(area.x + CELL_W, mid, 1, 1));
+    app.hits.times = hits;
 }
 
 /// A vertical slider on the left of the pane, filled from the bottom in
