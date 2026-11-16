@@ -36,9 +36,9 @@ Computers should do what we want, and no more. Programs should do what they do w
 - When you plug in new monitor, the monitor is added to the right of your existing monitors. The existing screens continue to have their present size and windows.
 - When monitors are added or removed, if the current set of monitors has settings, those settings are applied
 
-## Suspend Features
+## Lid Close Features
 Because we need to handle the common desired behavior around closing the lid while docked, we added full control of the lid behavior, even though there is some overlap with other systems.
-1. Always suspend on lid close - nothing to do
+1. Always suspend on lid close - prevent systemd from suspending on lid close.
 2. Suspend unless docked - closing the lid while external monitors are attached does not suspend the computer, rather reconfigures to just the external monitors
 3. Never suspend - if not docked, turn off the display, else, perform like option 2.
 

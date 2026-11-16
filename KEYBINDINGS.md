@@ -1,12 +1,13 @@
 # Key bindings
 
 The UI has an arrangement view at the top and panes along the bottom. The
-left-most pane picks a section, **Displays**, **Nightlight** or **Suspend**; the UI starts in
+left-most pane picks a section, **Displays**, **Nightlight** or **Lid Close**; the UI starts in
 the Displays section with the monitor list focused.
 
 - Displays section: **sections** · **displays** (pick a monitor) ·
   **settings** (pick a setting) · **options** (pick a value for that setting).
-- Nightlight and Suspend sections: **sections** · **settings** · **options**.
+- Nightlight section: **sections** · **settings** · **options**.
+- Lid Close section: **sections** · **lid close** (the choices).
 
 ## Navigating the panes
 
@@ -25,7 +26,7 @@ immediately; nothing reaches the display server until you apply.
 slider, `↑` makes the panel brighter and `↓` dimmer in 5% steps, and the change
 takes effect immediately. It is not part of Apply, Reset or the revert countdown.
 
-**Nightlight** and **Suspend** settings also take effect immediately (they are
+**Nightlight** and **Lid Close** settings also take effect immediately (they are
 saved and applied by the daemon, `rsds-w daemon`, which must be running). Its temperature is a
 slider: `↑` cooler (less tint), `↓` warmer, in 100 K steps from 1900 K to 6500 K.
 

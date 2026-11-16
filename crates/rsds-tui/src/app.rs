@@ -101,7 +101,7 @@ impl Section {
         match self {
             Section::Displays => "Displays",
             Section::Nightlight => "Nightlight",
-            Section::Suspend => "Suspend",
+            Section::Suspend => "Lid Close",
         }
     }
 
@@ -109,7 +109,9 @@ impl Section {
     pub fn panes(self) -> &'static [Focus] {
         match self {
             Section::Displays => &[Focus::Sections, Focus::Displays, Focus::Settings, Focus::Options],
-            Section::Nightlight | Section::Suspend => &[Focus::Sections, Focus::Settings, Focus::Options],
+            Section::Nightlight => &[Focus::Sections, Focus::Settings, Focus::Options],
+            // A single setting, so its choices are the only other pane.
+            Section::Suspend => &[Focus::Sections, Focus::Options],
         }
     }
 }
@@ -513,14 +515,14 @@ impl App {
         }
         match Suspend::load() {
             Ok(s) => self.suspend = s,
-            Err(e) => self.status = Some(format!("Couldn't read Suspend settings: {e}")),
+            Err(e) => self.status = Some(format!("Couldn't read Lid Close settings: {e}")),
         }
         self.daemon_running = rsds_core::daemon_lock::is_running();
     }
 
     fn save_suspend(&mut self) {
         if let Err(e) = self.suspend.save() {
-            self.status = Some(format!("Couldn't save Suspend settings: {e}"));
+            self.status = Some(format!("Couldn't save Lid Close settings: {e}"));
         }
     }
 

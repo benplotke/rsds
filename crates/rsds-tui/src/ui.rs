@@ -61,7 +61,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 (Focus::Options, options),
             ];
         }
-        Section::Nightlight | Section::Suspend => {
+        Section::Suspend => {
+            let [sections, options] =
+                Layout::horizontal([Constraint::Length(SECTIONS_W), Constraint::Min(20)]).areas(bottom);
+            draw_sections(f, app, sections);
+            draw_options(f, app, options);
+            app.hits.panes = vec![(Focus::Sections, sections), (Focus::Options, options)];
+        }
+        Section::Nightlight => {
             let [sections, settings, options] = Layout::horizontal([
                 Constraint::Length(SECTIONS_W),
                 Constraint::Length(SETTINGS_W),
@@ -299,7 +306,7 @@ fn draw_settings(f: &mut Frame, app: &mut App, area: Rect) {
     };
     let mut block = boxed(&title, SETTINGS_BOX, focused);
     if app.section != Section::Displays && !app.daemon_running {
-        block = block.title(Line::styled(" daemon not running ", Style::new().fg(WARN)).right_aligned());
+        block = block.title(daemon_warning());
     }
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -331,12 +338,22 @@ fn draw_settings(f: &mut Frame, app: &mut App, area: Rect) {
     app.hits.setting_rows = rows;
 }
 
+fn daemon_warning() -> Line<'static> {
+    Line::styled(" daemon not running ", Style::new().fg(WARN)).right_aligned()
+}
+
 fn draw_options(f: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::Options;
     let setting = app.current_setting();
     let (label, _, active) = setting_text(app, setting);
-    let title = format!("options: {}", label.to_lowercase());
-    let block = boxed(&title, OPTIONS_BOX, focused);
+    let title = match app.section {
+        Section::Suspend => label.to_lowercase(),
+        _ => format!("options: {}", label.to_lowercase()),
+    };
+    let mut block = boxed(&title, OPTIONS_BOX, focused);
+    if app.section == Section::Suspend && !app.daemon_running {
+        block = block.title(daemon_warning());
+    }
     let inner = block.inner(area);
     f.render_widget(block, area);
     let area = Rect { x: inner.x + 1, width: inner.width.saturating_sub(2), ..inner };

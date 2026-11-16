@@ -41,7 +41,7 @@ Decisions made during development that aren't in the README.
   Applied immediately, outside Apply/Revert. 0% maps to the lowest non-zero level so the
   panel never switches off.
 - Lid close: the daemon always holds a logind `handle-lid-switch` inhibitor and decides
-  itself what closing the lid does, from the Suspend setting (`~/.config/rsds/suspend.json`,
+  itself what closing the lid does, from the Lid Close setting (`~/.config/rsds/suspend.json`,
   `lid_close`: `suspend`, `suspend_unless_docked` (default) or `never`; watched like
   Nightlight's file):
   - Always suspend: the daemon calls logind's `Suspend`, docked or not (logind's default
