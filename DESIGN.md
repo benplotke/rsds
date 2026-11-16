@@ -32,7 +32,7 @@ Decisions made during development that aren't in the README.
   - The daemon holds a flock on `$XDG_RUNTIME_DIR/rsds-daemon.lock`; a second daemon
     refuses to start, and the UI uses it to warn when the daemon isn't running.
 - UI sections: a left-most pane switches between Displays (sections · displays · settings
-  · options) and Nightlight (sections · settings · options).
+  · options), Nightlight (sections · settings · options) and Lid Close (sections · lid close).
 - Identify: drawn by the UI process. Wayland: layer-shell + wl_shm buffer, digits drawn
   as simple blocky shapes (no font library). X11: one override-redirect window per monitor.
 - Brightness: logind `SetBrightness` over D-Bus (no root, no udev rules), via the `dbus`
@@ -40,15 +40,21 @@ Decisions made during development that aren't in the README.
   `eDP*`/`LVDS*`/`DSI*`) when a backlight device exists, preferring firmware > platform > raw.
   Applied immediately, outside Apply/Revert. 0% maps to the lowest non-zero level so the
   panel never switches off.
-- Lid close: the daemon always holds a logind `handle-lid-switch` inhibitor and decides
-  itself what closing the lid does, from the Lid Close setting (`~/.config/rsds/suspend.json`,
-  `lid_close`: `suspend`, `suspend_unless_docked` (default) or `never`; watched like
+- Lid close: unless the setting is System default, the daemon holds a logind
+  `handle-lid-switch` inhibitor and decides itself what closing the lid does, from the
+  Lid Close setting (`~/.config/rsds/lid-close.json`, `lid_close`: `suspend`,
+  `suspend_unless_docked` (default), `never` or `system_default`; watched like
   Nightlight's file):
   - Always suspend: the daemon calls logind's `Suspend`, docked or not (logind's default
     `HandleLidSwitchDocked=ignore` would otherwise keep a docked laptop awake).
   - Suspend unless docked: suspend without an external monitor; with one, turn the panel off.
   - Never suspend: with an external monitor, as above; without one, the panel's display
     is switched off (wlr-output-power-management) but it stays in the layout.
+  - System default: no inhibitor, so logind (`HandleLidSwitch*` in logind.conf) decides
+    whether to suspend; the daemon never suspends. With an external monitor, the panel is
+    still turned off as above. Without one, the daemon does nothing. Choosing it hands the
+    lid back to logind at once (the inhibitor is dropped); choosing another option takes
+    it over again.
   - Suspending happens only when the lid closes or the last external monitor is unplugged
     with the lid closed, never because the setting changed (so choosing Always suspend
     from the UI with the lid closed doesn't suspend on the spot).
@@ -75,6 +81,23 @@ Decisions made during development that aren't in the README.
   is ignored); the daemon takes it when the monitor set changes and handles the change
   starting from that configuration, as if the countdown had run out first. Without the
   daemon, the UI reverts by itself.
+- Duplicate: wlroots has no mirroring, so a duplicate is an output at its source's position
+  (labwc draws overlapping outputs with the same content; tested). The duplicate keeps its
+  own resolution and gets the largest scale (in the protocol's 1/256 steps) at which it
+  covers the source; with a different aspect ratio it shows a strip beyond the source along
+  one edge. Scales below 1 are fine on labwc (tested 0.5).
+  - Duplicates take no part in the arrangement: they are drawn in their source's box
+    ("1 | 3"), dragging either moves the source, and the duplicate's scale is greyed out.
+    When the source changes size, the duplicate's scale follows.
+  - Choices: Off, or any other monitor that is on and not a duplicate itself. A monitor
+    that others duplicate can become a duplicate; they then duplicate its new source.
+  - Stopping duplicating (Off, or the source turned off) gives the monitor the nearest
+    regular scale and puts it right of the others.
+  - The compositor doesn't report mirroring, so it is read from the layout: outputs at the
+    same position where one covers the others (within 3 px of rounding). When they are the
+    same size, which is the source comes from the UI's own edits, else the saved profile
+    (`duplicates`: the source's identity), else the first.
+  - The daemon keeps duplicates on their sources when it closes gaps.
 - Monitor identity in profiles: EDID make|model|serial; falls back to connector name when
   there is no serial.
 

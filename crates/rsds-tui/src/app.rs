@@ -5,9 +5,10 @@ use std::time::{Duration, Instant};
 use rsds_core::{
     Mode, Output, OutputConfig, Transform,
     nightlight::{self, Nightlight, TimeOfDay},
-    suspend::{LidClose, Suspend},
+    lid_close::{LidClose, LidCloseSettings},
     layout::{self, Rect},
-    profile::{active_outputs, monitor_set},
+    mirror,
+    profile::{Profile, active_outputs, duplicate_sources, monitor_set},
     unconfirmed,
 };
 
@@ -23,12 +24,15 @@ pub struct Entry {
     pub number: usize,
     pub live: Output,
     pub pending: OutputConfig,
+    /// Connector of the monitor this one duplicates in the pending config.
+    /// Its position and scale then follow from that monitor's.
+    pub duplicates: Option<String>,
 }
 
 impl Entry {
     fn new(number: usize, live: Output) -> Self {
         let pending = live.config();
-        Self { number, live, pending }
+        Self { number, live, pending, duplicates: None }
     }
 
     /// Rectangle in the global layout according to the pending config.
@@ -78,7 +82,7 @@ impl Entry {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
-    /// The left-most pane: Displays / Nightlight / Suspend.
+    /// The left-most pane: Displays / Nightlight / Lid Close.
     Sections,
     /// The monitor list (Displays section only).
     Displays,
@@ -91,17 +95,17 @@ pub enum Focus {
 pub enum Section {
     Displays,
     Nightlight,
-    Suspend,
+    LidClose,
 }
 
-pub const SECTIONS: [Section; 3] = [Section::Displays, Section::Nightlight, Section::Suspend];
+pub const SECTIONS: [Section; 3] = [Section::Displays, Section::Nightlight, Section::LidClose];
 
 impl Section {
     pub fn label(self) -> &'static str {
         match self {
             Section::Displays => "Displays",
             Section::Nightlight => "Nightlight",
-            Section::Suspend => "Lid Close",
+            Section::LidClose => "Lid Close",
         }
     }
 
@@ -111,7 +115,7 @@ impl Section {
             Section::Displays => &[Focus::Sections, Focus::Displays, Focus::Settings, Focus::Options],
             Section::Nightlight => &[Focus::Sections, Focus::Settings, Focus::Options],
             // A single setting, so its choices are the only other pane.
-            Section::Suspend => &[Focus::Sections, Focus::Options],
+            Section::LidClose => &[Focus::Sections, Focus::Options],
         }
     }
 }
@@ -125,13 +129,15 @@ pub enum Setting {
     Refresh,
     Orientation,
     Scale,
+    /// Show the same as another monitor.
+    Duplicate,
     // Nightlight section; applied immediately (saved for the daemon).
     NightlightEnabled,
     Temperature,
     Schedule,
     ScheduleStart,
     ScheduleEnd,
-    // Suspend section; applied immediately (saved for the daemon).
+    // Lid Close section; applied immediately (saved for the daemon).
     LidClose,
 }
 
@@ -143,7 +149,7 @@ const NIGHTLIGHT_SETTINGS: [Setting; 5] = [
     Setting::ScheduleEnd,
 ];
 
-const SUSPEND_SETTINGS: [Setting; 1] = [Setting::LidClose];
+const LID_CLOSE_SETTINGS: [Setting; 1] = [Setting::LidClose];
 
 /// Colour temperature step for keys and the scroll wheel, in kelvin.
 pub const TEMPERATURE_STEP: u32 = 100;
@@ -184,12 +190,13 @@ pub fn step_minute(m: u16, steps: i32) -> u16 {
     (on_grid + steps * s).rem_euclid(60) as u16
 }
 
-const DISPLAY_SETTINGS: [Setting; 5] = [
+pub const DISPLAY_SETTINGS: [Setting; 6] = [
     Setting::Enabled,
     Setting::Resolution,
     Setting::Refresh,
     Setting::Orientation,
     Setting::Scale,
+    Setting::Duplicate,
 ];
 
 /// Brightness step for keys and the scroll wheel, in percent.
@@ -223,6 +230,8 @@ pub enum Choice {
     Refresh(Mode),
     Orientation(Transform),
     Scale(f64),
+    /// Duplicate the monitor with this number, or (None) don't.
+    Duplicate(Option<usize>),
     LidClose(LidClose),
 }
 
@@ -235,7 +244,8 @@ impl Choice {
             Choice::Refresh(r) => mode.is_some_and(|m| m.same_as(&r)),
             Choice::Orientation(t) => t == e.pending.transform,
             Choice::Scale(s) => (s - e.pending.scale).abs() < 1e-6,
-            Choice::LidClose(_) => false,
+            // Depend on the other monitors: see `App::choices`.
+            Choice::Duplicate(_) | Choice::LidClose(_) => false,
         }
     }
 
@@ -261,6 +271,9 @@ impl Choice {
             Choice::Refresh(m) => format!("{:.3} Hz{rec}", m.refresh_hz()),
             Choice::Orientation(t) => orientation_label(t).into(),
             Choice::Scale(s) => format!("{}%", (s * 100.0).round()),
+            Choice::Duplicate(None) => "Off".into(),
+            // Named by `App::choice_label`.
+            Choice::Duplicate(Some(n)) => n.to_string(),
             Choice::LidClose(l) => l.label().into(),
         }
     }
@@ -396,9 +409,9 @@ pub struct App {
     pub section: Section,
     /// Nightlight settings, saved for the daemon on every change.
     pub nightlight: Nightlight,
-    /// Suspend settings, saved for the daemon on every change.
-    pub suspend: Suspend,
-    /// Whether the daemon (which applies Nightlight and Suspend) is running.
+    /// Lid Close settings, saved for the daemon on every change.
+    pub lid_close: LidCloseSettings,
+    /// Whether the daemon (which applies Nightlight and Lid Close) is running.
     pub daemon_running: bool,
     pub setting: Setting,
     /// Column of the schedule's time picker that up/down and typing change.
@@ -440,7 +453,7 @@ impl App {
             focus: Focus::Displays,
             section: Section::Displays,
             nightlight: Nightlight::default(),
-            suspend: Suspend::default(),
+            lid_close: LidCloseSettings::default(),
             daemon_running: false,
             setting: Setting::Enabled,
             time_column: TimeColumn::Hour,
@@ -470,27 +483,148 @@ impl App {
     pub fn sync(&mut self, outputs: &[Output]) {
         let mut next_number = self.entries.iter().map(|e| e.number).max().unwrap_or(0) + 1;
         self.entries.retain(|e| outputs.iter().any(|o| o.name == e.live.name));
+        let mut clean = Vec::new();
         for o in outputs {
-            match self.entries.iter_mut().find(|e| e.live.name == o.name) {
-                Some(e) => {
+            match self.entries.iter_mut().position(|e| e.live.name == o.name) {
+                Some(i) => {
+                    let e = &mut self.entries[i];
                     let was_clean = !e.is_dirty();
                     e.live = o.clone();
                     if was_clean {
                         e.pending = o.config();
+                        clean.push(i);
                     }
                 }
                 None => {
+                    clean.push(self.entries.len());
                     self.entries.push(Entry::new(next_number, o.clone()));
                     next_number += 1;
                 }
             }
         }
+        let live = self.live_duplicates(&self.current_sources());
+        for i in clean {
+            self.entries[i].duplicates = live[i].clone();
+        }
+        self.resolve_duplicates();
         if self.selected >= self.entries.len() {
             self.selected = self.entries.len().saturating_sub(1);
         }
         if self.drag.as_ref().is_some_and(|d| d.index >= self.entries.len()) {
             self.drag = None;
             self.frozen_view = None;
+        }
+    }
+
+    /// For each entry, the index of the entry it duplicates in the pending
+    /// config.
+    fn current_sources(&self) -> Vec<Option<usize>> {
+        self.entries
+            .iter()
+            .map(|e| e.duplicates.as_ref().and_then(|s| self.entries.iter().position(|x| &x.live.name == s)))
+            .collect()
+    }
+
+    /// Which entry each one duplicates in the live state, preferring the
+    /// sources in `hint` where it's ambiguous.
+    fn live_duplicates(&self, hint: &[Option<usize>]) -> Vec<Option<String>> {
+        let live: Vec<Output> = self.entries.iter().map(|e| e.live.clone()).collect();
+        duplicate_sources(&live, hint)
+            .into_iter()
+            .map(|s| s.map(|s| self.entries[s].live.name.clone()))
+            .collect()
+    }
+
+    /// Take which monitor duplicates which from the saved profile for the
+    /// current monitors, which tells them apart when they are the same size.
+    pub fn use_profile(&mut self, profile: &Profile) {
+        let live: Vec<Output> = self.entries.iter().map(|e| e.live.clone()).collect();
+        let hint = profile.duplicate_sources(&live);
+        let duplicates = self.live_duplicates(&hint);
+        for (e, d) in self.entries.iter_mut().zip(duplicates) {
+            if !e.is_dirty() {
+                e.duplicates = d;
+            }
+        }
+    }
+
+    /// For each entry, the index of the output it duplicates, for saving
+    /// in a profile of `outputs`.
+    pub fn duplicate_hint(&self, outputs: &[Output]) -> Vec<Option<usize>> {
+        outputs
+            .iter()
+            .map(|o| {
+                let e = self.entries.iter().find(|e| e.live.name == o.name)?;
+                let source = e.duplicates.as_ref()?;
+                outputs.iter().position(|x| &x.name == source)
+            })
+            .collect()
+    }
+
+    /// The entry the given entry duplicates, if any.
+    pub fn source_of(&self, index: usize) -> Option<usize> {
+        let source = self.entries.get(index)?.duplicates.as_ref()?;
+        self.entries.iter().position(|e| &e.live.name == source)
+    }
+
+    /// Entries that duplicate the given one.
+    pub fn duplicates_of(&self, index: usize) -> Vec<usize> {
+        (0..self.entries.len()).filter(|&j| self.source_of(j) == Some(index)).collect()
+    }
+
+    /// Rectangle of an entry in the arrangement, which duplicates don't
+    /// take part in: they sit on their sources.
+    fn layout_rect(&self, index: usize) -> Option<Rect> {
+        let e = &self.entries[index];
+        if e.duplicates.is_some() { None } else { e.rect() }
+    }
+
+    /// Put each duplicate on its source and scale it to show the source's
+    /// area. A duplicate whose source is gone, off, or a duplicate itself,
+    /// or that is off itself, stops duplicating.
+    fn resolve_duplicates(&mut self) {
+        for i in 0..self.entries.len() {
+            let source = self.source_of(i).filter(|&s| self.entries[s].duplicates.is_none());
+            let source_rect = source.and_then(|s| self.entries[s].rect());
+            let e = &mut self.entries[i];
+            if e.duplicates.is_none() {
+                continue;
+            }
+            match (source_rect, e.pending.mode.filter(|_| e.pending.enabled)) {
+                // Already in place (e.g. as the compositor rounded it).
+                (Some(r), Some(_)) if e.rect().is_some_and(|own| mirror::is_duplicate_of(own, r)) => {}
+                (Some(r), Some(mode)) => {
+                    e.pending.position = (r.x, r.y);
+                    e.pending.scale = mirror::scale_to_cover(&mode, e.pending.transform, r);
+                }
+                _ => e.duplicates = None,
+            }
+        }
+    }
+
+    /// Stop entry `index` duplicating: it gets the nearest regular scale
+    /// and goes to the right of the others.
+    fn stop_duplicating(&mut self, index: usize) {
+        let e = &mut self.entries[index];
+        if e.duplicates.take().is_none() {
+            return;
+        }
+        let scale = e.pending.scale;
+        e.pending.scale = SCALES.into_iter().min_by(|a, b| (a - scale).abs().total_cmp(&(b - scale).abs())).unwrap_or(1.0);
+        let others = self.other_rects(index);
+        let x = others.iter().map(Rect::right).max().unwrap_or(0);
+        let y = others.iter().map(|r| r.y).min().unwrap_or(0);
+        self.entries[index].pending.position = (x, y);
+    }
+
+    /// Label of a choice, naming the monitor a Duplicate choice refers to.
+    pub fn choice_label(&self, choice: &Choice, e: &Entry, short: bool) -> String {
+        match choice {
+            Choice::Duplicate(Some(n)) => match self.entries.iter().find(|x| x.number == *n) {
+                Some(x) => format!("{n} {}", x.live.name),
+                None => n.to_string(),
+            },
+            c => c.label(e, short),
         }
     }
 
@@ -507,21 +641,21 @@ impl App {
         }
     }
 
-    /// Load the Nightlight and Suspend settings and check for the daemon.
+    /// Load the Nightlight and Lid Close settings and check for the daemon.
     pub fn load_settings(&mut self) {
         match Nightlight::load() {
             Ok(n) => self.nightlight = n,
             Err(e) => self.status = Some(format!("Couldn't read Nightlight settings: {e}")),
         }
-        match Suspend::load() {
-            Ok(s) => self.suspend = s,
+        match LidCloseSettings::load() {
+            Ok(s) => self.lid_close = s,
             Err(e) => self.status = Some(format!("Couldn't read Lid Close settings: {e}")),
         }
         self.daemon_running = rsds_core::daemon_lock::is_running();
     }
 
-    fn save_suspend(&mut self) {
-        if let Err(e) = self.suspend.save() {
+    fn save_lid_close(&mut self) {
+        if let Err(e) = self.lid_close.save() {
             self.status = Some(format!("Couldn't save Lid Close settings: {e}"));
         }
     }
@@ -669,7 +803,7 @@ impl App {
     pub fn settings(&self) -> Vec<Setting> {
         match self.section {
             Section::Nightlight => return NIGHTLIGHT_SETTINGS.to_vec(),
-            Section::Suspend => return SUSPEND_SETTINGS.to_vec(),
+            Section::LidClose => return LID_CLOSE_SETTINGS.to_vec(),
             Section::Displays => {}
         }
         let mut v = DISPLAY_SETTINGS.to_vec();
@@ -710,8 +844,8 @@ impl App {
     pub fn choices(&self) -> (Vec<Choice>, Option<usize>) {
         match self.section {
             Section::Nightlight => return self.nightlight_choices(),
-            Section::Suspend => {
-                let current = LidClose::ALL.iter().position(|l| *l == self.suspend.lid_close);
+            Section::LidClose => {
+                let current = LidClose::ALL.iter().position(|l| *l == self.lid_close.lid_close);
                 return (LidClose::ALL.into_iter().map(Choice::LidClose).collect(), current);
             }
             Section::Displays => {}
@@ -721,8 +855,23 @@ impl App {
         if !e.pending.enabled && setting != Setting::Enabled {
             return (Vec::new(), None);
         }
+        if setting == Setting::Duplicate {
+            let mut choices = vec![Choice::Duplicate(None)];
+            choices.extend(
+                self.entries
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, x)| *j != self.selected && x.pending.enabled && x.duplicates.is_none())
+                    .map(|(_, x)| Choice::Duplicate(Some(x.number))),
+            );
+            let source = self.source_of(self.selected).map(|s| self.entries[s].number);
+            let current = choices.iter().position(|c| *c == Choice::Duplicate(source));
+            return (choices, current);
+        }
         let choices: Vec<Choice> = match setting {
             Setting::Enabled => vec![Choice::Enabled(true), Choice::Enabled(false)],
+            // A duplicate's scale follows from its source.
+            Setting::Scale if e.duplicates.is_some() => Vec::new(),
             // Shown as a slider rather than a list.
             Setting::Brightness => Vec::new(),
             Setting::Resolution => e.resolutions().into_iter().map(Choice::Resolution).collect(),
@@ -834,11 +983,15 @@ impl App {
             return;
         }
         if let Choice::LidClose(l) = choice {
-            self.suspend.lid_close = l;
-            self.save_suspend();
+            self.lid_close.lid_close = l;
+            self.save_lid_close();
             return;
         }
         let i = self.selected;
+        if let Choice::Duplicate(target) = choice {
+            self.set_duplicate(i, target);
+            return;
+        }
         let before = self.entries[i].rect();
         let e = &mut self.entries[i];
         match choice {
@@ -864,8 +1017,8 @@ impl App {
                     .or(modes.last())
                     .copied();
             }
-            // Handled above: not a monitor setting.
-            Choice::LidClose(_) => return,
+            // Handled above.
+            Choice::Duplicate(_) | Choice::LidClose(_) => return,
             Choice::Refresh(mode) => {
                 e.pending.mode = Some(mode);
                 return; // size unchanged
@@ -874,6 +1027,27 @@ impl App {
             Choice::Scale(scale) => e.pending.scale = scale,
         }
         self.fixup_layout(i, before);
+    }
+
+    /// Make entry `index` duplicate the monitor numbered `target`, or stop
+    /// duplicating. Monitors duplicating it then duplicate `target` too.
+    fn set_duplicate(&mut self, index: usize, target: Option<usize>) {
+        let Some(target) = target else {
+            self.stop_duplicating(index);
+            self.fixup_layout(index, None);
+            return;
+        };
+        let Some(source) = self.entries.iter().position(|e| e.number == target) else { return };
+        if source == index || self.entries[source].duplicates.is_some() {
+            return;
+        }
+        let name = self.entries[source].live.name.clone();
+        for j in self.duplicates_of(index) {
+            self.entries[j].duplicates = Some(name.clone());
+        }
+        self.entries[index].duplicates = Some(name);
+        // It leaves its place in the arrangement: close the gap.
+        self.fixup_layout(source, None);
     }
 
     pub fn toggle_enabled(&mut self) {
@@ -886,6 +1060,11 @@ impl App {
                 return;
             }
             e.pending.enabled = false;
+            e.duplicates = None;
+            // Its duplicates become monitors of their own.
+            for j in self.duplicates_of(i) {
+                self.stop_duplicating(j);
+            }
         } else {
             e.pending.enabled = true;
             if e.pending.mode.is_none() {
@@ -903,30 +1082,27 @@ impl App {
         self.fixup_layout(i, None);
     }
 
-    /// Enabled monitor rects other than `index`.
+    /// Enabled monitor rects other than `index`, leaving out duplicates.
     fn other_rects(&self, index: usize) -> Vec<Rect> {
-        self.entries
-            .iter()
-            .enumerate()
-            .filter(|(j, _)| *j != index)
-            .filter_map(|(_, e)| e.rect())
-            .collect()
+        (0..self.entries.len()).filter(|&j| j != index).filter_map(|j| self.layout_rect(j)).collect()
     }
 
     /// After monitor `changed` changed size or was turned on/off, move the
     /// others so nothing overlaps and nothing floats detached. `before` is
     /// its rect before a resize, so its neighbours can follow its edges.
     fn fixup_layout(&mut self, changed: usize, before: Option<Rect>) {
+        if self.entries[changed].duplicates.is_some() {
+            // It sits on its source; only its scale changes.
+            self.resolve_duplicates();
+            return;
+        }
         let anchor = self.entries[changed].rect();
         let centre = anchor
             .map(|r| (r.x + r.w / 2, r.y + r.h / 2))
             .unwrap_or(self.entries[changed].pending.position);
-        let (indices, mut rects): (Vec<usize>, Vec<Rect>) = self
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(j, _)| *j != changed)
-            .filter_map(|(j, e)| e.rect().map(|r| (j, r)))
+        let (indices, mut rects): (Vec<usize>, Vec<Rect>) = (0..self.entries.len())
+            .filter(|&j| j != changed)
+            .filter_map(|j| self.layout_rect(j).map(|r| (j, r)))
             .unzip();
         if let (Some(old), Some(new)) = (before, anchor) {
             layout::follow_resize(old, new, &mut rects);
@@ -939,11 +1115,12 @@ impl App {
             self.entries[j].pending.position = (r.x, r.y);
         }
         self.normalize();
+        self.resolve_duplicates();
     }
 
     /// Shift all enabled monitors so the layout starts at (0, 0).
     fn normalize(&mut self) {
-        let rects: Vec<Rect> = self.entries.iter().filter_map(Entry::rect).collect();
+        let rects: Vec<Rect> = (0..self.entries.len()).filter_map(|j| self.layout_rect(j)).collect();
         let (dx, dy) = layout::normalize_offset(&rects);
         for e in self.entries.iter_mut().filter(|e| e.pending.enabled) {
             e.pending.position.0 += dx;
@@ -952,6 +1129,7 @@ impl App {
     }
 
     pub fn begin_drag(&mut self, index: usize, cell: (u16, u16)) {
+        let index = self.source_of(index).unwrap_or(index);
         self.select(index);
         self.set_section(Section::Displays);
         self.focus = Focus::Displays;
@@ -997,8 +1175,10 @@ impl App {
     }
 
     fn reset_pending(&mut self) {
-        for e in &mut self.entries {
+        let live = self.live_duplicates(&self.current_sources());
+        for (e, d) in self.entries.iter_mut().zip(live) {
             e.pending = e.live.config();
+            e.duplicates = d;
         }
     }
 
@@ -1033,6 +1213,11 @@ impl App {
             if let Some(p) = c.previous.iter().find(|p| p.name == e.pending.name) {
                 e.pending = p.clone();
             }
+        }
+        let rects: Vec<Option<Rect>> = self.entries.iter().map(Entry::rect).collect();
+        let sources = mirror::infer(&rects, &self.current_sources());
+        for i in 0..self.entries.len() {
+            self.entries[i].duplicates = sources[i].map(|s| self.entries[s].live.name.clone());
         }
         Some(Request::Revert(c.previous))
     }

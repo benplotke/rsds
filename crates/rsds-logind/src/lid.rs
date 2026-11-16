@@ -91,7 +91,7 @@ impl Lid {
             .method_call(
                 MANAGER,
                 "Inhibit",
-                ("handle-lid-switch", "rsds", "rsds handles the lid as set in its Suspend settings", "block"),
+                ("handle-lid-switch", "rsds", "rsds handles the lid as set in its Lid Close settings", "block"),
             )
             .map_err(io::Error::other)?;
         Ok(Inhibitor { _fd: fd })

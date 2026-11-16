@@ -30,7 +30,7 @@ const WARN: Color = Color::Rgb(0xe0, 0xb0, 0x40);
 pub fn draw(f: &mut Frame, app: &mut App) {
     app.hits = Hits::default();
     // Keep the bottom height stable when switching sections.
-    let display_settings = 5 + app.backlight.is_some() as usize;
+    let display_settings = app::DISPLAY_SETTINGS.len() + app.backlight.is_some() as usize;
     // Odd, so the time picker's current row can sit exactly in the middle.
     let rows = app.entries.len().max(display_settings).max(app.settings().len()) | 1;
     let [top, bottom, footer] = Layout::vertical([
@@ -61,7 +61,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 (Focus::Options, options),
             ];
         }
-        Section::Suspend => {
+        Section::LidClose => {
             let [sections, options] =
                 Layout::horizontal([Constraint::Length(SECTIONS_W), Constraint::Min(20)]).areas(bottom);
             draw_sections(f, app, sections);
@@ -146,18 +146,24 @@ fn draw_arrangement(f: &mut Frame, app: &mut App, area: Rect) {
     let dragged = app.drag.as_ref().map(|d| d.index);
     let mut grid = BorderGrid::default();
     let mut boxes = Vec::new();
+    // A duplicate is drawn as part of its source's box, which is selected
+    // when either is.
+    let selected = app.source_of(app.selected).unwrap_or(app.selected);
     // The selected monitor goes last so it wins clicks on shared edges.
-    let mut order: Vec<usize> = (0..app.entries.len()).filter(|&i| i != app.selected).collect();
-    order.push(app.selected);
+    let mut order: Vec<usize> = (0..app.entries.len()).filter(|&i| i != selected).collect();
+    order.push(selected);
     for i in order {
         let e = &app.entries[i];
+        if e.duplicates.is_some() {
+            continue;
+        }
         let Some(rect) = e.rect() else { continue };
         let cells = view.to_cells(rect);
         if cells.width < 3 || cells.height < 3 {
             continue;
         }
         if Some(i) != dragged {
-            let selected = i == app.selected;
+            let selected = i == selected;
             let (color, rank) = if selected { (HI, 1) } else { (MONITOR, 0) };
             grid.add(cells, if selected { 2 } else { 1 }, color, rank);
         }
@@ -169,7 +175,7 @@ fn draw_arrangement(f: &mut Frame, app: &mut App, area: Rect) {
         let e = &app.entries[i];
         let body = if Some(i) == dragged {
             let block = Block::bordered()
-                .border_type(if i == app.selected { BorderType::Thick } else { BorderType::Rounded })
+                .border_type(if i == selected { BorderType::Thick } else { BorderType::Rounded })
                 .border_style(Style::new().fg(WARN));
             let body = block.inner(cells);
             f.render_widget(Clear, cells);
@@ -179,9 +185,13 @@ fn draw_arrangement(f: &mut Frame, app: &mut App, area: Rect) {
             Rect::new(cells.x + 1, cells.y + 1, cells.width - 2, cells.height - 2)
         };
 
+        // A source and its duplicates, e.g. "1 | 3" and "eDP-1 | DP-6".
+        let shown: Vec<&Entry> =
+            std::iter::once(e).chain(app.duplicates_of(i).into_iter().map(|j| &app.entries[j])).collect();
+        let join = |f: fn(&Entry) -> String| shown.iter().map(|x| f(x)).collect::<Vec<_>>().join(" | ");
         let mut lines = vec![
-            Line::styled(e.number.to_string(), Style::new().fg(TITLE).add_modifier(Modifier::BOLD)),
-            Line::styled(e.live.name.clone(), Style::new().fg(FG)),
+            Line::styled(join(|x| x.number.to_string()), Style::new().fg(TITLE).add_modifier(Modifier::BOLD)),
+            Line::styled(join(|x| x.live.name.clone()), Style::new().fg(FG)),
         ];
         if let Some(m) = e.pending.mode {
             lines.push(Line::styled(format!("{}×{}", m.width, m.height), Style::new().fg(INACTIVE)));
@@ -279,7 +289,12 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
         let row = Rect { y: inner.y + i as u16, height: 1, ..inner };
         let name = format!("{} {}", e.live.make, e.live.model);
         let dirty = if e.is_dirty() { "*" } else { " " };
-        let state = if e.pending.enabled { "" } else { " off" };
+        let source = app.source_of(i).map(|s| app.entries[s].number);
+        let state = match (e.pending.enabled, source) {
+            (false, _) => " off".into(),
+            (true, Some(n)) => format!(" dup of {n}"),
+            (true, None) => String::new(),
+        };
         let text = format!("{dirty}{:>2} {:<7} {name}{state}", e.number, e.live.name);
         let mut style = Style::new().fg(if e.pending.enabled { FG } else { INACTIVE });
         if i == app.selected {
@@ -300,7 +315,7 @@ fn draw_settings(f: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::Settings;
     let title = match (app.section, app.selected_entry()) {
         (Section::Nightlight, _) => "nightlight".into(),
-        (Section::Suspend, _) => "suspend".into(),
+        (Section::LidClose, _) => "lid close".into(),
         (Section::Displays, Some(e)) => format!("settings: {} {}", e.number, e.live.name),
         (Section::Displays, None) => "settings".into(),
     };
@@ -347,11 +362,11 @@ fn draw_options(f: &mut Frame, app: &mut App, area: Rect) {
     let setting = app.current_setting();
     let (label, _, active) = setting_text(app, setting);
     let title = match app.section {
-        Section::Suspend => label.to_lowercase(),
+        Section::LidClose => label.to_lowercase(),
         _ => format!("options: {}", label.to_lowercase()),
     };
     let mut block = boxed(&title, OPTIONS_BOX, focused);
-    if app.section == Section::Suspend && !app.daemon_running {
+    if app.section == Section::LidClose && !app.daemon_running {
         block = block.title(daemon_warning());
     }
     let inner = block.inner(area);
@@ -468,7 +483,7 @@ fn setting_text(app: &App, s: Setting) -> (&'static str, String, bool) {
         Setting::Schedule => return ("Schedule", on_off(n.schedule), true),
         Setting::ScheduleStart => return ("Turn on at", n.start.to_string(), n.schedule),
         Setting::ScheduleEnd => return ("Turn off at", n.end.to_string(), n.schedule),
-        Setting::LidClose => return ("Lid close", app.suspend.lid_close.label().into(), true),
+        Setting::LidClose => return ("Lid close", app.lid_close.lid_close.label().into(), true),
         _ => {}
     }
     let Some(e) = app.selected_entry() else { return ("", String::new(), false) };
@@ -485,8 +500,15 @@ fn setting_text(app: &App, s: Setting) -> (&'static str, String, bool) {
         Setting::Refresh => mode.map(Choice::Refresh),
         Setting::Orientation => on.then_some(Choice::Orientation(e.pending.transform)),
         Setting::Scale => on.then_some(Choice::Scale(e.pending.scale)),
+        Setting::Duplicate => {
+            let source = app.source_of(app.selected).map(|s| app.entries[s].number);
+            let value = if on { app.choice_label(&Choice::Duplicate(source), e, false) } else { "—".into() };
+            return ("Duplicate", value, active);
+        }
         _ => None,
     };
+    // A duplicate's scale follows from its source.
+    let active = active && !(s == Setting::Scale && e.duplicates.is_some());
     let label = match s {
         Setting::Enabled => "Display",
         Setting::Resolution => "Resolution",
@@ -509,7 +531,7 @@ fn draw_choices(f: &mut Frame, app: &mut App, area: Rect) {
     if choices.is_empty() || area.width < 4 || area.height == 0 {
         return;
     }
-    let labels: Vec<String> = choices.iter().map(|c| c.label(e, true)).collect();
+    let labels: Vec<String> = choices.iter().map(|c| app.choice_label(c, e, true)).collect();
     let col_w = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16 + 4;
     let rows = area.height as usize;
     let total_cols = labels.len().div_ceil(rows);

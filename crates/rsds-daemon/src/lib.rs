@@ -6,7 +6,7 @@
 //!   the remaining ones are slid together to close gaps; and if every
 //!   monitor would be off, they are all turned on.
 //! - At startup, the saved profile (if any) for the current set is applied.
-//! - Lid: the daemon holds logind's lid inhibitor and follows the Suspend
+//! - Lid: the daemon holds logind's lid inhibitor and follows the Lid Close
 //!   settings (see `lid`): suspend, or (with an external monitor) turn the
 //!   built-in panel off and leave it out of the monitor set, so closing or
 //!   opening the lid is handled like unplugging or plugging in the panel,
@@ -22,7 +22,7 @@ use std::io;
 use rsds_core::{
     Backend, Error, Output, OutputConfig,
     layout::{self, Rect},
-    profile::{Profiles, active_outputs, monitor_set},
+    profile::{Profiles, active_outputs, duplicate_sources, monitor_set},
     unconfirmed,
 };
 use rustix::event::{PollFd, PollFlags};
@@ -147,11 +147,13 @@ pub fn plan(outputs: &[Output], previous: Option<&[String]>, profiles: &Profiles
     let mut configs = current.clone();
 
     // Close gaps left by removed monitors (among the ones that stayed).
+    // Duplicates stay on their sources rather than being spread out.
     if removed {
+        let sources = duplicate_sources(outputs, &[]);
         let (idx, rects): (Vec<usize>, Vec<Rect>) = configs
             .iter()
             .enumerate()
-            .filter(|(i, _)| !added[*i])
+            .filter(|(i, _)| !added[*i] && sources[*i].is_none())
             .filter_map(|(i, c)| c.rect().map(|r| (i, r)))
             .unzip();
         let origin = (
@@ -160,6 +162,11 @@ pub fn plan(outputs: &[Output], previous: Option<&[String]>, profiles: &Profiles
         );
         for (i, r) in idx.into_iter().zip(layout::compact(None, origin, &rects)) {
             configs[i].position = (r.x, r.y);
+        }
+        for (i, source) in sources.iter().enumerate() {
+            if let Some(s) = *source {
+                configs[i].position = configs[s].position;
+            }
         }
     }
 
@@ -303,6 +310,21 @@ mod tests {
     }
 
     #[test]
+    fn removal_keeps_duplicate_on_its_source() {
+        // DP-2 duplicates DP-1, right of the panel; DP-3 between them is unplugged.
+        let before = [
+            output("eDP-1", "L", Some((0, 0))),
+            output("DP-3", "C", Some((1920, 0))),
+            output("DP-1", "A", Some((3840, 0))),
+            output("DP-2", "B", Some((3840, 0))),
+        ];
+        let now = [before[0].clone(), before[2].clone(), before[3].clone()];
+        let plan = plan(&now, Some(&ids(&before)), &Profiles::default()).unwrap();
+        assert_eq!(by_name(&plan, "DP-1").position, (1920, 0));
+        assert_eq!(by_name(&plan, "DP-2").position, (1920, 0));
+    }
+
+    #[test]
     fn never_all_off() {
         let before = [output("eDP-1", "L", None), output("DP-1", "A", Some((0, 0)))];
         let now = [before[0].clone()];
@@ -315,7 +337,7 @@ mod tests {
     fn saved_profile_wins() {
         let saved = [output("eDP-1", "L", Some((1920, 0))), output("DP-1", "A", Some((0, 0)))];
         let mut profiles = Profiles::default();
-        profiles.remember(&saved);
+        profiles.remember(&saved, &[]);
         let now = [output("eDP-1", "L", Some((0, 0))), output("DP-1", "A", Some((1920, 0)))];
         let plan = plan(&now, None, &profiles).unwrap();
         assert_eq!(plan[0].position, (1920, 0));
@@ -375,7 +397,7 @@ mod tests {
     #[test]
     fn lid_close_uses_externals_profile() {
         let mut profiles = Profiles::default();
-        profiles.remember(&[output("DP-1", "A", Some((1920, 0))), output("DP-2", "B", Some((0, 0)))]);
+        profiles.remember(&[output("DP-1", "A", Some((1920, 0))), output("DP-2", "B", Some((0, 0)))], &[]);
         let outputs = [
             output("eDP-1", "L", Some((0, 1080))),
             output("DP-1", "A", Some((0, 0))),

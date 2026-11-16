@@ -23,7 +23,7 @@ use ratatui::{
 use rsds_core::{
     Backend, OutputConfig,
     profile::{Profiles, active_outputs},
-    suspend::LidClose,
+    lid_close::LidClose,
 };
 use rustix::event::{PollFd, PollFlags, Timespec};
 
@@ -47,6 +47,12 @@ fn event_loop<B: Backend>(terminal: &mut DefaultTerminal, backend: &mut B) -> io
     app.load_settings();
     // Learn whether the lid has taken the panel out of use.
     app.outputs_changed(backend.outputs(), lid_closed(&app));
+    // Which monitor duplicates which, where they are the same size.
+    if let Ok(profiles) = Profiles::load()
+        && let Some(p) = profiles.find(&active_outputs(backend.outputs(), lid_closed(&app)))
+    {
+        app.use_profile(p);
+    }
     let stdin = io::stdin();
     // Start crossterm's event source now so it installs its SIGWINCH
     // handler; the signal interrupts poll() below and we pick up resizes.
@@ -99,7 +105,7 @@ fn event_loop<B: Backend>(terminal: &mut DefaultTerminal, backend: &mut B) -> io
 /// Whether the lid is closed and that takes the built-in panel out of use
 /// (which it does unless closing the lid suspends).
 fn lid_closed(app: &App) -> bool {
-    app.suspend.lid_close != LidClose::Suspend && rsds_logind::lid::is_closed()
+    app.lid_close.lid_close != LidClose::Suspend && rsds_logind::lid::is_closed()
 }
 
 /// Quitting during a confirmation countdown reverts, as if it ran out.
@@ -128,8 +134,9 @@ fn perform<B: Backend>(app: &mut App, backend: &mut B, request: Request) {
         Request::SaveProfile => {
             // With the lid closed, this is the profile for the externals.
             let outputs = active_outputs(backend.outputs(), lid_closed(app));
+            let hint = app.duplicate_hint(&outputs);
             let saved = Profiles::load().and_then(|mut p| {
-                p.remember(&outputs);
+                p.remember(&outputs, &hint);
                 p.save()
             });
             if let Err(e) = saved {
@@ -334,6 +341,7 @@ mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
     use rsds_core::{Mode, Output, Transform};
+    use crate::app::Setting;
 
     fn output(name: &str, make: &str, modes: &[(i32, i32, i32)], cur: usize, pos: (i32, i32)) -> Output {
         Output {
@@ -433,5 +441,86 @@ mod tests {
         app.toggle_enabled();
         app.outputs_changed(&sample(), true);
         assert!(!app.is_dirty());
+    }
+
+    /// Choose option `choice` of `setting` for entry `index`.
+    fn set(app: &mut App, index: usize, setting: Setting, choice: usize) {
+        app.select(index);
+        app.setting = setting;
+        app.choose(choice);
+    }
+
+    /// The live outputs after applying the app's pending configuration.
+    fn applied(app: &App) -> Vec<Output> {
+        app.entries.iter().map(|e| e.live.with_config(&e.pending)).collect()
+    }
+
+    #[test]
+    fn duplicate_sits_on_source_and_is_drawn_with_it() {
+        let mut app = App::new(&sample(), None);
+        // DP-5 (3, 1920x2160) duplicates eDP-1 (1): choices are Off, 1, 2.
+        set(&mut app, 2, Setting::Duplicate, 1);
+        let dup = &app.entries[2];
+        assert_eq!(dup.duplicates.as_deref(), Some("eDP-1"));
+        assert_eq!(dup.pending.position, (0, 0));
+        assert_eq!(dup.pending.scale, 1.0);
+        assert_eq!(app.entries[1].pending.position, (1920, 0));
+        let screen = render(&mut app);
+        assert!(screen.contains("1 | 3") && screen.contains("eDP-1 | DP-5"), "{screen}");
+        assert!(screen.contains("dup of 1"), "{screen}");
+
+        // Once applied, the live state reads back the same way.
+        let live = applied(&app);
+        app.sync(&live);
+        app.reset();
+        assert_eq!(app.entries[2].duplicates.as_deref(), Some("eDP-1"));
+        assert!(!app.is_dirty());
+
+        // Off: back to a monitor of its own, right of the others.
+        set(&mut app, 2, Setting::Duplicate, 0);
+        assert_eq!(app.entries[2].duplicates, None);
+        assert_eq!(app.entries[2].pending.position, (3840, 0));
+    }
+
+    #[test]
+    fn duplicate_follows_source_resize_and_drag() {
+        let mut app = App::new(&sample(), None);
+        // DP-3 (2, 1920x1080) duplicates DP-5 (3, 1920x2160).
+        set(&mut app, 1, Setting::Duplicate, 2);
+        let source = app.entries[2].rect().unwrap();
+        assert_eq!(app.entries[1].pending.position, (source.x, source.y));
+        assert_eq!(app.entries[1].pending.scale, 0.5, "shows the whole height");
+        // DP-5 to 3840x2160: DP-3 still covers it.
+        set(&mut app, 2, Setting::Resolution, 1);
+        let source = app.entries[2].rect().unwrap();
+        assert_eq!(source.w, 3840);
+        assert_eq!(app.entries[1].pending.scale, 0.5);
+        assert_eq!(app.entries[1].pending.position, (source.x, source.y));
+        // The duplicate's scale can't be chosen.
+        app.setting = Setting::Scale;
+        app.select(1);
+        assert!(app.choices().0.is_empty());
+    }
+
+    #[test]
+    fn same_size_duplicate_keeps_direction() {
+        let mut app = App::new(&sample(), None);
+        // eDP-1 (1) duplicates DP-3 (2): both 1920x1080.
+        set(&mut app, 0, Setting::Duplicate, 1);
+        let live = applied(&app);
+        app.sync(&live);
+        app.reset();
+        assert_eq!(app.entries[0].duplicates.as_deref(), Some("DP-3"));
+        assert_eq!(app.entries[1].duplicates, None);
+    }
+
+    #[test]
+    fn turning_source_off_frees_duplicate() {
+        let mut app = App::new(&sample(), None);
+        set(&mut app, 2, Setting::Duplicate, 1);
+        set(&mut app, 0, Setting::Enabled, 1);
+        assert_eq!(app.entries[2].duplicates, None);
+        let rects: Vec<_> = app.entries.iter().filter_map(|e| e.rect()).collect();
+        assert!(rsds_core::layout::is_valid(&rects), "{rects:?}");
     }
 }

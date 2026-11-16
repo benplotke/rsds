@@ -1,12 +1,13 @@
-//! The lid in the daemon: follows the lid (via logind) and the Suspend
+//! The lid in the daemon: follows the lid (via logind) and the Lid Close
 //! settings, holds logind's lid inhibitor so that the daemon decides what
-//! closing the lid does, and suspends or turns the panel off accordingly.
+//! closing the lid does (except with System default, which leaves the lid
+//! to logind), and suspends or turns the panel off accordingly.
 
 use std::os::fd::BorrowedFd;
 
 use rsds_core::{
     Backend, Output,
-    suspend::{LidClose, Suspend},
+    lid_close::{LidClose, LidCloseSettings},
 };
 use rsds_logind::lid::{Inhibitor, Lid};
 
@@ -30,7 +31,7 @@ pub fn policy(closed: bool, docked: bool, setting: LidClose) -> Policy {
         && match setting {
             LidClose::Suspend => true,
             LidClose::SuspendUnlessDocked => !docked,
-            LidClose::Never => false,
+            LidClose::Never | LidClose::SystemDefault => false,
         };
     Policy {
         suspend,
@@ -41,8 +42,9 @@ pub fn policy(closed: bool, docked: bool, setting: LidClose) -> Policy {
 
 pub(crate) struct Service {
     lid: Option<Lid>,
-    // Held, never read: dropping it lets logind act on the lid again.
-    _inhibitor: Option<Inhibitor>,
+    /// Held unless the setting is System default; dropping it lets logind
+    /// act on the lid again.
+    inhibitor: Option<Inhibitor>,
     closed: bool,
     setting: LidClose,
     /// (lid closed, docked) at the last update. Suspending only happens
@@ -54,13 +56,26 @@ pub(crate) struct Service {
 impl Service {
     pub(crate) fn new() -> Self {
         let lid = Lid::watch().inspect_err(|e| log!("can't watch the lid: {e}")).ok();
-        let inhibitor = lid.as_ref().and_then(|l| {
-            l.inhibit()
-                .inspect_err(|e| log!("can't take over the lid switch from logind: {e}"))
-                .ok()
-        });
         let closed = lid.as_ref().is_some_and(read);
-        Self { lid, _inhibitor: inhibitor, closed, setting: load(), last: None, panel_dark: false }
+        let mut service = Self { lid, inhibitor: None, closed, setting: load(), last: None, panel_dark: false };
+        service.update_inhibitor();
+        service
+    }
+
+    /// Take over the lid switch from logind, or hand it back, as the
+    /// setting calls for.
+    fn update_inhibitor(&mut self) {
+        let wanted = self.setting != LidClose::SystemDefault;
+        match (&self.lid, wanted) {
+            (Some(lid), true) if self.inhibitor.is_none() => {
+                self.inhibitor = lid
+                    .inhibit()
+                    .inspect_err(|e| log!("can't take over the lid switch from logind: {e}"))
+                    .ok();
+            }
+            (_, false) => self.inhibitor = None,
+            _ => {}
+        }
     }
 
     /// Readable when logind has news about the lid; then call `lid_changed`.
@@ -80,6 +95,7 @@ impl Service {
         if setting != self.setting {
             log!("lid close: {}", setting.label());
             self.setting = setting;
+            self.update_inhibitor();
         }
     }
 
@@ -125,10 +141,10 @@ fn read(lid: &Lid) -> bool {
 }
 
 fn load() -> LidClose {
-    Suspend::load()
+    LidCloseSettings::load()
         .map(|s| s.lid_close)
         .unwrap_or_else(|e| {
-            log!("can't read suspend settings: {e}");
+            log!("can't read Lid Close settings: {e}");
             LidClose::default()
         })
 }
@@ -157,6 +173,14 @@ mod tests {
         assert!(!docked.suspend && docked.panel_out_of_set && !docked.panel_dark);
         let alone = policy(true, false, LidClose::Never);
         assert!(!alone.suspend && !alone.panel_out_of_set && alone.panel_dark);
+    }
+
+    #[test]
+    fn system_default() {
+        let docked = policy(true, true, LidClose::SystemDefault);
+        assert!(!docked.suspend && docked.panel_out_of_set && !docked.panel_dark);
+        let alone = policy(true, false, LidClose::SystemDefault);
+        assert!(!alone.suspend && !alone.panel_out_of_set && !alone.panel_dark);
     }
 
     #[test]

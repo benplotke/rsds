@@ -26,6 +26,10 @@ immediately; nothing reaches the display server until you apply.
 slider, `↑` makes the panel brighter and `↓` dimmer in 5% steps, and the change
 takes effect immediately. It is not part of Apply, Reset or the revert countdown.
 
+**Duplicate** lists Off and the other monitors that are on. A duplicate is drawn
+inside its source's box in the arrangement (e.g. `1 | 3`); dragging that box moves
+both, and the duplicate's scale is set for you.
+
 **Nightlight** and **Lid Close** settings also take effect immediately (they are
 saved and applied by the daemon, `rsds-w daemon`, which must be running). Its temperature is a
 slider: `↑` cooler (less tint), `↓` warmer, in 100 K steps from 1900 K to 6500 K.

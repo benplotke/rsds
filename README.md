@@ -27,20 +27,21 @@ Computers should do what we want, and no more. Programs should do what they do w
 - Nightlight toggle with optional schedule
 - Identify button which causes each screen to flash its number
 - List of monitors with the settings for each
-- Settings for each monitor are: on or off, primary, resolution, refresh rate, orientation and scale
+- Settings for each monitor are: on or off, primary, resolution, refresh rate, orientation, scale, and duplicate (to duplicate another monitor).
 - New layout reverts after 15 seconds if you don't select accept on the countdown
-- Lid close options to either suspend, suspend if not docked, or never suspend
+- Lid close options to either suspend, suspend if not docked, never suspend, or use the system defaults
 
 ## Daemon Features
 - Settings for previously configured monitor sets are saved as JSON to ~/.config/rsds/profiles.json
 - When you plug in new monitor, the monitor is added to the right of your existing monitors. The existing screens continue to have their present size and windows.
 - When monitors are added or removed, if the current set of monitors has settings, those settings are applied
 
-## Lid Close Features
+## Lid Close Options
 Because we need to handle the common desired behavior around closing the lid while docked, we added full control of the lid behavior, even though there is some overlap with other systems.
 1. Always suspend on lid close - prevent systemd from suspending on lid close.
 2. Suspend unless docked - closing the lid while external monitors are attached does not suspend the computer, rather reconfigures to just the external monitors
 3. Never suspend - if not docked, turn off the display, else, perform like option 2.
+4. System default - We don't influence suspend, but do reconfigure displays if needed
 
 ## Compatibility
 The Wayland package was developed on Labwc and the X11 was developed on OpenBox. If you have compatibility issues, feel free to raise an issue.

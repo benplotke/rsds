@@ -30,6 +30,10 @@ pub struct SavedOutput {
     /// by the monitor's current connector when the profile is applied.
     #[serde(flatten)]
     pub config: OutputConfig,
+    /// Identity of the monitor this one duplicates, if any. Only needed to
+    /// tell which is which when both are the same size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplicates: Option<String>,
 }
 
 /// Sorted identities of a set of outputs.
@@ -59,6 +63,26 @@ impl Profile {
             })
             .collect()
     }
+
+    /// For each of `outputs`, the index of the output it duplicates
+    /// according to this profile.
+    pub fn duplicate_sources(&self, outputs: &[Output]) -> Vec<Option<usize>> {
+        outputs
+            .iter()
+            .map(|o| {
+                let saved = self.outputs.iter().find(|s| s.identity == o.identity())?;
+                let source = saved.duplicates.as_ref()?;
+                outputs.iter().position(|x| &x.identity() == source)
+            })
+            .collect()
+    }
+}
+
+/// For each of `outputs`, the index of the output it duplicates (see
+/// [`crate::mirror::infer`]).
+pub fn duplicate_sources(outputs: &[Output], hint: &[Option<usize>]) -> Vec<Option<usize>> {
+    let rects: Vec<_> = outputs.iter().map(|o| o.config().rect()).collect();
+    crate::mirror::infer(&rects, hint)
 }
 
 /// `$XDG_CONFIG_HOME/rsds`, defaulting to `~/.config/rsds`.
@@ -118,12 +142,20 @@ impl Profiles {
     }
 
     /// Record the current state of `outputs` as the profile for their set.
-    pub fn remember(&mut self, outputs: &[Output]) {
+    /// `hint` says which output each one duplicates, where known (see
+    /// [`duplicate_sources`]).
+    pub fn remember(&mut self, outputs: &[Output], hint: &[Option<usize>]) {
+        let sources = duplicate_sources(outputs, hint);
         let profile = Profile {
             monitors: monitor_set(outputs),
             outputs: outputs
                 .iter()
-                .map(|o| SavedOutput { identity: o.identity(), config: o.config() })
+                .zip(sources)
+                .map(|(o, source)| SavedOutput {
+                    identity: o.identity(),
+                    config: o.config(),
+                    duplicates: source.map(|s| outputs[s].identity()),
+                })
                 .collect(),
         };
         match self.profiles.iter_mut().find(|p| p.monitors == profile.monitors) {
@@ -159,7 +191,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rsds-test-{}", std::process::id()));
         let path = dir.join("profiles.json");
         let mut p = Profiles::default();
-        p.remember(&[output("DP-1", "A", 0), output("DP-2", "B", 1920)]);
+        p.remember(&[output("DP-1", "A", 0), output("DP-2", "B", 1920)], &[]);
         p.save_to(&path).unwrap();
         let loaded = Profiles::load_from(&path).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
@@ -176,10 +208,20 @@ mod tests {
     #[test]
     fn remember_replaces_same_set() {
         let mut p = Profiles::default();
-        p.remember(&[output("DP-1", "A", 0)]);
-        p.remember(&[output("DP-1", "A", 100)]);
+        p.remember(&[output("DP-1", "A", 0)], &[]);
+        p.remember(&[output("DP-1", "A", 100)], &[]);
         assert_eq!(p.profiles.len(), 1);
         assert_eq!(p.profiles[0].outputs[0].config.position, (100, 0));
+    }
+
+    #[test]
+    fn remembers_which_duplicates_which() {
+        // Same size, so only the hint can tell: B duplicates A.
+        let outputs = [output("DP-1", "A", 0), output("DP-2", "B", 0)];
+        let mut p = Profiles::default();
+        p.remember(&outputs, &[Some(1), None]);
+        let profile = p.find(&outputs).unwrap();
+        assert_eq!(profile.duplicate_sources(&outputs), vec![Some(1), None]);
     }
 
     #[test]
