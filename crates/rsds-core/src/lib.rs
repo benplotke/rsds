@@ -7,6 +7,7 @@ pub mod nightlight;
 pub mod output;
 pub mod profile;
 pub mod suspend;
+pub mod unconfirmed;
 
 pub use output::{Mode, Output, OutputConfig, Transform};
 

@@ -23,6 +23,7 @@ use rsds_core::{
     Backend, Error, Output, OutputConfig,
     layout::{self, Rect},
     profile::{Profiles, active_outputs, monitor_set},
+    unconfirmed,
 };
 use rustix::event::{PollFd, PollFlags};
 
@@ -55,11 +56,23 @@ pub fn run<B: Backend>(mut backend: B) -> io::Result<()> {
                 log!("can't read profiles: {e}");
                 Profiles::default()
             });
+            // During the UI's "keep these settings?" countdown, start from
+            // the configuration it would revert to.
+            let baseline = match unconfirmed::take() {
+                Some(previous) => {
+                    log!("reverting unconfirmed configuration");
+                    with_configs(&outputs, &previous)
+                }
+                None => outputs.clone(),
+            };
+            let active = with_configs(&active, &baseline.iter().map(Output::config).collect::<Vec<_>>());
             // Starting with the lid closed and the panel on is handled as if
             // the lid had just closed.
-            let panel_on = outputs.iter().any(|o| o.enabled && !active.iter().any(|a| a.name == o.name));
+            let panel_on = baseline.iter().any(|o| o.enabled && !active.iter().any(|a| a.name == o.name));
             let previous = known.clone().or_else(|| panel_on.then(|| monitor_set(&outputs)));
-            if let Some(configs) = plan_with_lid(&outputs, &active, previous.as_deref(), &profiles) {
+            let configs = plan_with_lid(&baseline, &active, previous.as_deref(), &profiles)
+                .unwrap_or_else(|| baseline.iter().map(Output::config).collect());
+            if !same_configs(&configs, &outputs) {
                 apply(&mut backend, &configs);
             }
             known = Some(set);
@@ -186,9 +199,21 @@ pub fn plan_with_lid(
     for o in outputs.iter().filter(|o| !active.iter().any(|a| a.name == o.name)) {
         configs.push(OutputConfig { enabled: false, ..o.config() });
     }
+    (!same_configs(&configs, outputs)).then_some(configs)
+}
+
+/// Whether applying `configs` would leave `outputs` as they are.
+fn same_configs(configs: &[OutputConfig], outputs: &[Output]) -> bool {
     let current: Vec<OutputConfig> = outputs.iter().map(Output::config).collect();
-    let unchanged = configs.len() == current.len() && configs.iter().all(|c| current.contains(c));
-    (!unchanged).then_some(configs)
+    configs.len() == current.len() && configs.iter().all(|c| current.contains(c))
+}
+
+/// `outputs` with the configurations in `configs` (matched by name) applied.
+fn with_configs(outputs: &[Output], configs: &[OutputConfig]) -> Vec<Output> {
+    outputs
+        .iter()
+        .map(|o| configs.iter().find(|c| c.name == o.name).map_or_else(|| o.clone(), |c| o.with_config(c)))
+        .collect()
 }
 
 /// Turn output `i` on at its preferred mode, placed right of the enabled
@@ -377,5 +402,18 @@ mod tests {
         let outputs = [output("eDP-1", "L", Some((0, 0)))];
         assert_eq!(active_outputs(&outputs, true).len(), 1);
         assert!(close_lid(&outputs, &Profiles::default()).is_none());
+    }
+
+    #[test]
+    fn plugging_in_during_countdown_starts_from_reverted() {
+        // Confirmed: DP-2 left of DP-1. Unconfirmed: swapped. Then DP-3 arrives.
+        let previous = [output("DP-2", "B", Some((0, 0))).config(), output("DP-1", "A", Some((1920, 0))).config()];
+        let before = [output("DP-1", "A", Some((0, 0))), output("DP-2", "B", Some((1920, 0)))];
+        let now = [before[0].clone(), before[1].clone(), output("DP-3", "C", Some((0, 0)))];
+        let baseline = with_configs(&now, &previous);
+        let plan = plan_with_lid(&baseline, &baseline, Some(&ids(&before)), &Profiles::default()).unwrap();
+        assert_eq!(by_name(&plan, "DP-2").position, (0, 0));
+        assert_eq!(by_name(&plan, "DP-1").position, (1920, 0));
+        assert_eq!(by_name(&plan, "DP-3").position, (3840, 0));
     }
 }

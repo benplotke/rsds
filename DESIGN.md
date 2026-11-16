@@ -65,6 +65,16 @@ Decisions made during development that aren't in the README.
     window to the output nearest its centre, and back when the panel returns).
   - Only logind's lid handling can be inhibited; anything else that suspends on the lid
     (e.g. an acpid handler running `systemctl suspend`) must be turned off by the user.
+- Dragging: on release, an edge within half a terminal cell (per axis) of another
+  monitor's parallel edge snaps to it, so any alignment is reachable by dragging and
+  moving one cell away from an aligned edge is never undone.
+- Monitors coming or going (including the panel when the lid takes it out of use) while
+  the UI is open: unapplied edits are dropped and the UI shows the live state. During the
+  "Keep these display settings?" countdown, the UI records the configuration to revert to
+  in `$XDG_RUNTIME_DIR/rsds-unconfirmed.json` (with the countdown's end, so a stale file
+  is ignored); the daemon takes it when the monitor set changes and handles the change
+  starting from that configuration, as if the countdown had run out first. Without the
+  daemon, the UI reverts by itself.
 - Monitor identity in profiles: EDID make|model|serial; falls back to connector name when
   there is no serial.
 

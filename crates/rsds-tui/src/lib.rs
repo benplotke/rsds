@@ -23,6 +23,7 @@ use ratatui::{
 use rsds_core::{
     Backend, OutputConfig,
     profile::{Profiles, active_outputs},
+    suspend::LidClose,
 };
 use rustix::event::{PollFd, PollFlags, Timespec};
 
@@ -44,6 +45,8 @@ enum Flow {
 fn event_loop<B: Backend>(terminal: &mut DefaultTerminal, backend: &mut B) -> io::Result<()> {
     let mut app = App::new(backend.outputs(), rsds_logind::Backlight::find());
     app.load_settings();
+    // Learn whether the lid has taken the panel out of use.
+    app.outputs_changed(backend.outputs(), lid_closed(&app));
     let stdin = io::stdin();
     // Start crossterm's event source now so it installs its SIGWINCH
     // handler; the signal interrupts poll() below and we pick up resizes.
@@ -69,7 +72,9 @@ fn event_loop<B: Backend>(terminal: &mut DefaultTerminal, backend: &mut B) -> io
         }
 
         if backend.dispatch().map_err(io::Error::other)? {
-            app.sync(backend.outputs());
+            if let Some(r) = app.outputs_changed(backend.outputs(), lid_closed(&app)) {
+                perform(&mut app, backend, r);
+            }
         }
         while event::poll(Duration::ZERO)? {
             let request = match event::read()? {
@@ -89,6 +94,12 @@ fn event_loop<B: Backend>(terminal: &mut DefaultTerminal, backend: &mut B) -> io
             perform(&mut app, backend, r);
         }
     }
+}
+
+/// Whether the lid is closed and that takes the built-in panel out of use
+/// (which it does unless closing the lid suspends).
+fn lid_closed(app: &App) -> bool {
+    app.suspend.lid_close != LidClose::Suspend && rsds_logind::lid::is_closed()
 }
 
 /// Quitting during a confirmation countdown reverts, as if it ran out.
@@ -116,7 +127,7 @@ fn perform<B: Backend>(app: &mut App, backend: &mut B, request: Request) {
         }
         Request::SaveProfile => {
             // With the lid closed, this is the profile for the externals.
-            let outputs = active_outputs(backend.outputs(), rsds_logind::lid::is_closed());
+            let outputs = active_outputs(backend.outputs(), lid_closed(app));
             let saved = Profiles::load().and_then(|mut p| {
                 p.remember(&outputs);
                 p.save()
@@ -397,5 +408,30 @@ mod tests {
         app.toggle_enabled();
         assert_eq!(app.entries[2].pending.position, (1920, 0));
         assert!(app.is_dirty());
+    }
+
+    #[test]
+    fn monitor_change_drops_unapplied_edits() {
+        let mut app = App::new(&sample(), None);
+        app.select(1);
+        app.toggle_enabled();
+        assert!(app.is_dirty());
+        // Same monitors, changed by someone else: edits stay.
+        assert!(app.outputs_changed(&sample(), false).is_none());
+        assert!(app.is_dirty());
+        // A monitor unplugged: edits go, and the UI shows the live state.
+        let unplugged: Vec<_> = sample().into_iter().filter(|o| o.name != "DP-5").collect();
+        assert!(app.outputs_changed(&unplugged, false).is_none());
+        assert!(!app.is_dirty());
+        assert_eq!(app.entries.len(), 2);
+    }
+
+    #[test]
+    fn lid_closing_counts_as_monitor_change() {
+        let mut app = App::new(&sample(), None);
+        app.select(1);
+        app.toggle_enabled();
+        app.outputs_changed(&sample(), true);
+        assert!(!app.is_dirty());
     }
 }

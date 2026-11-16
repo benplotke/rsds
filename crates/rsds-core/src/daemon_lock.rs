@@ -5,11 +5,16 @@ use std::{fs::File, io, path::PathBuf};
 
 use rustix::fs::{FlockOperation, flock};
 
-/// `$XDG_RUNTIME_DIR/rsds-daemon.lock` (falls back to /tmp, per user).
+/// `$XDG_RUNTIME_DIR/rsds-daemon.lock`.
 fn path() -> PathBuf {
+    runtime_file("rsds-daemon.lock")
+}
+
+/// `name` in `$XDG_RUNTIME_DIR` (falls back to /tmp, prefixed with the uid).
+pub(crate) fn runtime_file(name: &str) -> PathBuf {
     match std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
-        Some(dir) => PathBuf::from(dir).join("rsds-daemon.lock"),
-        None => PathBuf::from(format!("/tmp/rsds-daemon-{}.lock", rustix::process::getuid().as_raw())),
+        Some(dir) => PathBuf::from(dir).join(name),
+        None => PathBuf::from(format!("/tmp/{}-{name}", rustix::process::getuid().as_raw())),
     }
 }
 

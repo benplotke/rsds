@@ -7,6 +7,8 @@ use rsds_core::{
     nightlight::{self, Nightlight, TimeOfDay},
     suspend::{LidClose, Suspend},
     layout::{self, Rect},
+    profile::{active_outputs, monitor_set},
+    unconfirmed,
 };
 
 /// How long a newly applied configuration waits for confirmation.
@@ -320,6 +322,14 @@ impl View {
         ratatui::layout::Rect::new(cx0, cy0, cx1 - cx0, cy1 - cy0)
     }
 
+    /// How close (x, y) in layout pixels an edge must be dropped to another
+    /// to snap to it: half a cell, so any alignment can be reached by
+    /// dragging, and moving one cell away from one is never undone.
+    pub fn snap_threshold(self) -> (i32, i32) {
+        let half = self.px_per_col / 2.0;
+        (half as i32, (half * Self::ROW_ASPECT) as i32)
+    }
+
     /// Layout pixel offset for a movement of (dcol, drow) cells.
     pub fn cells_to_px(self, dcol: i32, drow: i32) -> (i32, i32) {
         (
@@ -406,6 +416,9 @@ pub struct App {
     /// The built-in panel's backlight, if this machine has one.
     pub backlight: Option<rsds_logind::Backlight>,
     pub hits: Hits,
+    /// Identities of the monitors in use (see `active_outputs`), to notice
+    /// monitors coming and going (including the panel when the lid closes).
+    monitor_set: Vec<String>,
 }
 
 impl App {
@@ -439,6 +452,7 @@ impl App {
             status: None,
             backlight,
             hits: Hits::default(),
+            monitor_set: monitor_set(outputs),
         }
     }
 
@@ -968,8 +982,7 @@ impl App {
             return;
         }
         let Some(rect) = self.entries[d.index].rect() else { return };
-        // Edges within about two cells of another edge snap to it.
-        let threshold = view.map_or(0, |v| (v.px_per_col * 2.0) as i32);
+        let threshold = view.map_or((0, 0), View::snap_threshold);
         let snapped = layout::snap(rect, &self.other_rects(d.index), threshold);
         self.entries[d.index].pending.position = (snapped.x, snapped.y);
         self.fixup_layout(d.index, None);
@@ -977,10 +990,14 @@ impl App {
 
     /// Discard unapplied edits.
     pub fn reset(&mut self) {
+        self.reset_pending();
+        self.status = None;
+    }
+
+    fn reset_pending(&mut self) {
         for e in &mut self.entries {
             e.pending = e.live.config();
         }
-        self.status = None;
     }
 
     pub fn apply(&mut self) -> Option<Request> {
@@ -992,24 +1009,61 @@ impl App {
 
     /// Called after a user-initiated apply succeeded.
     pub fn applied(&mut self, previous: Vec<OutputConfig>) {
-        self.confirm = Some(Confirm { deadline: Instant::now() + REVERT_AFTER, previous });
         self.status = None;
+        // For the daemon, in case monitors change during the countdown.
+        if let Err(e) = unconfirmed::save(&previous, REVERT_AFTER) {
+            self.status = Some(format!("Couldn't record the previous configuration: {e}"));
+        }
+        self.confirm = Some(Confirm { deadline: Instant::now() + REVERT_AFTER, previous });
     }
 
     /// The user confirmed the new configuration: remember it.
     pub fn keep(&mut self) -> Request {
         self.confirm = None;
+        unconfirmed::clear();
         Request::SaveProfile
     }
 
     pub fn revert(&mut self) -> Option<Request> {
         let c = self.confirm.take()?;
+        unconfirmed::clear();
         for e in &mut self.entries {
             if let Some(p) = c.previous.iter().find(|p| p.name == e.pending.name) {
                 e.pending = p.clone();
             }
         }
         Some(Request::Revert(c.previous))
+    }
+
+    /// The display server reported a change we didn't make. `lid_closed`:
+    /// the lid is closed and that takes the panel out of use.
+    ///
+    /// If monitors came or went, unapplied edits are dropped and any
+    /// confirmation countdown ends: the daemon reverts the unconfirmed
+    /// configuration while handling the change. Without the daemon, the
+    /// returned request reverts it.
+    pub fn outputs_changed(&mut self, outputs: &[Output], lid_closed: bool) -> Option<Request> {
+        let set = monitor_set(&active_outputs(outputs, lid_closed));
+        self.sync(outputs);
+        if set == self.monitor_set {
+            return None;
+        }
+        self.monitor_set = set;
+        let confirm = self.confirm.take();
+        if confirm.is_some() || self.is_dirty() {
+            self.status = Some("Monitors changed: unapplied changes discarded".into());
+        }
+        self.drag = None;
+        self.frozen_view = None;
+        self.reset_pending();
+        let previous = confirm?.previous;
+        if rsds_core::daemon_lock::is_running() {
+            return None;
+        }
+        unconfirmed::clear();
+        let present: Vec<OutputConfig> =
+            previous.into_iter().filter(|c| outputs.iter().any(|o| o.name == c.name)).collect();
+        Some(Request::Revert(present))
     }
 
     /// Time until the next timed event, if any.

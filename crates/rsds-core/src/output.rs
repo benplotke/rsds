@@ -112,6 +112,18 @@ impl Output {
         ))
     }
 
+    /// This output as it would be after applying `c`.
+    pub fn with_config(&self, c: &OutputConfig) -> Output {
+        Output {
+            enabled: c.enabled,
+            current_mode: c.mode.and_then(|m| self.modes.iter().position(|x| x.same_as(&m))),
+            position: c.position,
+            transform: c.transform,
+            scale: c.scale,
+            ..self.clone()
+        }
+    }
+
     /// The configuration that reproduces this output's current state.
     pub fn config(&self) -> OutputConfig {
         OutputConfig {
