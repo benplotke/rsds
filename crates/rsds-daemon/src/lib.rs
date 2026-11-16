@@ -6,9 +6,15 @@
 //!   the remaining ones are slid together to close gaps; and if every
 //!   monitor would be off, they are all turned on.
 //! - At startup, the saved profile (if any) for the current set is applied.
+//! - Lid: the daemon holds logind's lid inhibitor and follows the Suspend
+//!   settings (see `lid`): suspend, or (with an external monitor) turn the
+//!   built-in panel off and leave it out of the monitor set, so closing or
+//!   opening the lid is handled like unplugging or plugging in the panel,
+//!   or (never suspending, without one) just turn the panel's display off.
 //! - Nightlight: applies the colour temperature from the settings file,
 //!   following its schedule (see `nightlight`).
 
+mod lid;
 mod nightlight;
 
 use std::io;
@@ -16,7 +22,7 @@ use std::io;
 use rsds_core::{
     Backend, Error, Output, OutputConfig,
     layout::{self, Rect},
-    profile::{Profiles, monitor_set},
+    profile::{Profiles, active_outputs, monitor_set},
 };
 use rustix::event::{PollFd, PollFlags};
 
@@ -32,41 +38,60 @@ pub fn run<B: Backend>(mut backend: B) -> io::Result<()> {
     let mut nightlight = nightlight::Service::new()?;
     nightlight.update(&mut backend);
 
-    // Identities of the monitors seen last time; None until the first pass.
+    let mut lid = lid::Service::new();
+
+    // Identities of the active monitors last time; None until the first pass.
     let mut known: Option<Vec<String>> = None;
     loop {
-        let set = monitor_set(backend.outputs());
+        let outputs = backend.outputs().to_vec();
+        lid.update(&mut backend, &outputs);
+
+        let active = active_outputs(&outputs, lid.policy(&outputs).panel_out_of_set);
+        let set = monitor_set(&active);
         if known.as_ref() != Some(&set) {
-            log!("monitors: {}", describe(backend.outputs()));
+            let lid_note = if active.len() < outputs.len() { " (lid closed)" } else { "" };
+            log!("monitors: {}{lid_note}", describe(&active));
             let profiles = Profiles::load().unwrap_or_else(|e| {
                 log!("can't read profiles: {e}");
                 Profiles::default()
             });
-            if let Some(configs) = plan(backend.outputs(), known.as_deref(), &profiles) {
+            // Starting with the lid closed and the panel on is handled as if
+            // the lid had just closed.
+            let panel_on = outputs.iter().any(|o| o.enabled && !active.iter().any(|a| a.name == o.name));
+            let previous = known.clone().or_else(|| panel_on.then(|| monitor_set(&outputs)));
+            if let Some(configs) = plan_with_lid(&outputs, &active, previous.as_deref(), &profiles) {
                 apply(&mut backend, &configs);
             }
             known = Some(set);
         }
 
-        let (config_ready, timer_ready) = {
+        let (config_ready, timer_ready, lid_ready) = {
             let [config, timer] = nightlight.fds();
-            let mut fds = [
+            let mut fds = vec![
                 PollFd::from_borrowed_fd(backend.fd(), PollFlags::IN),
                 PollFd::from_borrowed_fd(config, PollFlags::IN),
                 PollFd::from_borrowed_fd(timer, PollFlags::IN),
             ];
+            if let Some(fd) = lid.fd() {
+                fds.push(PollFd::from_borrowed_fd(fd, PollFlags::IN));
+            }
             match rustix::event::poll(&mut fds, None) {
                 Ok(_) | Err(rustix::io::Errno::INTR) => {}
                 Err(e) => return Err(e.into()),
             }
-            (!fds[1].revents().is_empty(), !fds[2].revents().is_empty())
+            let ready = |i: usize| fds.get(i).is_some_and(|f| !f.revents().is_empty());
+            (ready(1), ready(2), ready(3))
         };
         backend.dispatch().map_err(io::Error::other)?;
         if config_ready {
+            lid.config_changed();
             nightlight.config_changed(&mut backend);
         }
         if timer_ready {
             nightlight.timer_fired(&mut backend);
+        }
+        if lid_ready {
+            lid.lid_changed();
         }
     }
 }
@@ -146,6 +171,24 @@ pub fn plan(outputs: &[Output], previous: Option<&[String]>, profiles: &Profiles
         c.position.1 += dy;
     }
     changed(configs)
+}
+
+/// [`plan`] for the `active` outputs, with every other output (the panel
+/// of a closed laptop) turned off. Returns None if nothing needs to change.
+pub fn plan_with_lid(
+    outputs: &[Output],
+    active: &[Output],
+    previous: Option<&[String]>,
+    profiles: &Profiles,
+) -> Option<Vec<OutputConfig>> {
+    let mut configs = plan(active, previous, profiles)
+        .unwrap_or_else(|| active.iter().map(Output::config).collect());
+    for o in outputs.iter().filter(|o| !active.iter().any(|a| a.name == o.name)) {
+        configs.push(OutputConfig { enabled: false, ..o.config() });
+    }
+    let current: Vec<OutputConfig> = outputs.iter().map(Output::config).collect();
+    let unchanged = configs.len() == current.len() && configs.iter().all(|c| current.contains(c));
+    (!unchanged).then_some(configs)
 }
 
 /// Turn output `i` on at its preferred mode, placed right of the enabled
@@ -265,5 +308,74 @@ mod tests {
         let before = [output("eDP-1", "L", Some((0, 0)))];
         let now = [before[0].clone(), output("DP-1", "A", Some((1920, 0)))];
         assert!(plan(&now, Some(&ids(&before)), &Profiles::default()).is_none());
+    }
+
+    fn by_name<'a>(configs: &'a [OutputConfig], name: &str) -> &'a OutputConfig {
+        configs.iter().find(|c| c.name == name).unwrap()
+    }
+
+    /// Plan after the lid closes, given the monitors before.
+    fn close_lid(outputs: &[Output], profiles: &Profiles) -> Option<Vec<OutputConfig>> {
+        let active = active_outputs(outputs, true);
+        plan_with_lid(outputs, &active, Some(&ids(outputs)), profiles)
+    }
+
+    #[test]
+    fn lid_close_turns_panel_off_and_keeps_externals() {
+        // DP-1 above the panel, DP-2 right of DP-1.
+        let outputs = [
+            output("eDP-1", "L", Some((0, 1080))),
+            output("DP-1", "A", Some((0, 0))),
+            output("DP-2", "B", Some((1920, 0))),
+        ];
+        let plan = close_lid(&outputs, &Profiles::default()).unwrap();
+        assert!(!by_name(&plan, "eDP-1").enabled);
+        assert_eq!(by_name(&plan, "DP-1").position, (0, 0));
+        assert_eq!(by_name(&plan, "DP-2").position, (1920, 0));
+    }
+
+    #[test]
+    fn lid_close_closes_gap() {
+        let outputs = [
+            output("DP-1", "A", Some((0, 0))),
+            output("eDP-1", "L", Some((1920, 0))),
+            output("DP-2", "B", Some((3840, 0))),
+        ];
+        let plan = close_lid(&outputs, &Profiles::default()).unwrap();
+        assert!(!by_name(&plan, "eDP-1").enabled);
+        assert_eq!(by_name(&plan, "DP-1").position, (0, 0));
+        assert_eq!(by_name(&plan, "DP-2").position, (1920, 0));
+    }
+
+    #[test]
+    fn lid_close_uses_externals_profile() {
+        let mut profiles = Profiles::default();
+        profiles.remember(&[output("DP-1", "A", Some((1920, 0))), output("DP-2", "B", Some((0, 0)))]);
+        let outputs = [
+            output("eDP-1", "L", Some((0, 1080))),
+            output("DP-1", "A", Some((0, 0))),
+            output("DP-2", "B", Some((1920, 0))),
+        ];
+        let plan = close_lid(&outputs, &profiles).unwrap();
+        assert!(!by_name(&plan, "eDP-1").enabled);
+        assert_eq!(by_name(&plan, "DP-1").position, (1920, 0));
+        assert_eq!(by_name(&plan, "DP-2").position, (0, 0));
+    }
+
+    #[test]
+    fn lid_open_adds_panel_on_right() {
+        let outputs = [output("eDP-1", "L", None), output("DP-1", "A", Some((0, 0)))];
+        let before = active_outputs(&outputs, true);
+        let plan = plan_with_lid(&outputs, &outputs, Some(&ids(&before)), &Profiles::default()).unwrap();
+        let panel = by_name(&plan, "eDP-1");
+        assert!(panel.enabled);
+        assert_eq!(panel.position, (1920, 0));
+    }
+
+    #[test]
+    fn lid_closed_without_externals_keeps_panel() {
+        let outputs = [output("eDP-1", "L", Some((0, 0)))];
+        assert_eq!(active_outputs(&outputs, true).len(), 1);
+        assert!(close_lid(&outputs, &Profiles::default()).is_none());
     }
 }

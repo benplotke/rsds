@@ -29,14 +29,25 @@ Computers should do what we want, and no more. Programs should do what they do w
 - List of monitors with the settings for each
 - Settings for each monitor are: on or off, primary, resolution, refresh rate, orientation and scale
 - New layout reverts after 15 seconds if you don't select accept on the countdown
+- Lid close options to either suspend, suspend if not docked, or never suspend
 
 ## Daemon Features
 - Settings for previously configured monitor sets are saved as JSON to ~/.config/rsds/profiles.json
 - When you plug in new monitor, the monitor is added to the right of your existing monitors. The existing screens continue to have their present size and windows.
 - When monitors are added or removed, if the current set of monitors has settings, those settings are applied
 
-## Other Features
-- Closing the lid while external monitors are attached does not suspend the computer, rather reconfigures to just the external monitors
+## Suspend Features
+Because we need to handle the common desired behavior around closing the lid while docked, we added full control of the lid behavior, even though there is some overlap with other systems.
+1. Always suspend on lid close - nothing to do
+2. Suspend unless docked - closing the lid while external monitors are attached does not suspend the computer, rather reconfigures to just the external monitors
+3. Never suspend - if not docked, turn off the display, else, perform like option 2.
 
 ## Compatibility
 The Wayland package was developed on Labwc and the X11 was developed on OpenBox. If you have compatibility issues, feel free to raise an issue.
+
+## Troubleshooting
+
+### Laptop Suspends on Lid Close
+
+If you have acpid.service running, Check that you do not have anything set in the lid close case in `/etc/acpi/handler.sh`.
+Check that you do not have conflicting settings in `/etc/systemd/logind.conf`, particularly the settings with `HandleLidSwitch` in the name.

@@ -39,6 +39,14 @@ pub fn monitor_set(outputs: &[Output]) -> Vec<String> {
     ids
 }
 
+/// The outputs that make up the monitor set. With the lid closed and an
+/// external monitor connected, the built-in panel doesn't count: it is
+/// turned off, and that situation has its own profile.
+pub fn active_outputs(outputs: &[Output], lid_closed: bool) -> Vec<Output> {
+    let docked = lid_closed && outputs.iter().any(|o| !o.is_internal());
+    outputs.iter().filter(|o| !(docked && o.is_internal())).cloned().collect()
+}
+
 impl Profile {
     /// The configuration to apply to `outputs`, with connector names
     /// resolved. None if the profile doesn't cover every output.

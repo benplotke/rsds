@@ -6,6 +6,7 @@ pub mod layout;
 pub mod nightlight;
 pub mod output;
 pub mod profile;
+pub mod suspend;
 
 pub use output::{Mode, Output, OutputConfig, Transform};
 
@@ -42,6 +43,10 @@ pub trait Backend {
     /// tint with None. The backend keeps applying it to outputs that are
     /// connected later.
     fn set_color_temperature(&mut self, kelvin: Option<u32>) -> Result<(), Error>;
+
+    /// Turn the named output's display off or back on. Unlike disabling
+    /// it, this leaves the output where it is in the layout.
+    fn set_power(&mut self, output: &str, on: bool) -> Result<(), Error>;
 }
 
 #[derive(Debug)]

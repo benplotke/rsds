@@ -3,5 +3,6 @@
 mod gamma;
 mod identify;
 mod output_management;
+mod power;
 
 pub use output_management::WaylandBackend;

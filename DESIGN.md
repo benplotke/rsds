@@ -40,8 +40,31 @@ Decisions made during development that aren't in the README.
   `eDP*`/`LVDS*`/`DSI*`) when a backlight device exists, preferring firmware > platform > raw.
   Applied immediately, outside Apply/Revert. 0% maps to the lowest non-zero level so the
   panel never switches off.
-- Lid close: the daemon holds a logind `handle-lid-switch` inhibitor only while external
-  monitors are connected, and turns off the internal panel when the lid closes.
+- Lid close: the daemon always holds a logind `handle-lid-switch` inhibitor and decides
+  itself what closing the lid does, from the Suspend setting (`~/.config/rsds/suspend.json`,
+  `lid_close`: `suspend`, `suspend_unless_docked` (default) or `never`; watched like
+  Nightlight's file):
+  - Always suspend: the daemon calls logind's `Suspend`, docked or not (logind's default
+    `HandleLidSwitchDocked=ignore` would otherwise keep a docked laptop awake).
+  - Suspend unless docked: suspend without an external monitor; with one, turn the panel off.
+  - Never suspend: with an external monitor, as above; without one, the panel's display
+    is switched off (wlr-output-power-management) but it stays in the layout.
+  - Suspending happens only when the lid closes or the last external monitor is unplugged
+    with the lid closed, never because the setting changed (so choosing Always suspend
+    from the UI with the lid closed doesn't suspend on the spot).
+  - "Docked" means any external monitor is connected.
+  - If the daemon isn't running, logind's own lid settings apply.
+  - Lid state from logind's `LidClosed` property (watched via `PropertiesChanged`).
+  - With the lid closed and an external connected, the panel is left out of the monitor set
+    (it is still connected, but turned off), so closing the lid is handled like unplugging
+    the panel: the externals' profile is applied if there is one, otherwise gaps close.
+    Opening it is handled like plugging the panel in: the full set's profile if there is
+    one, otherwise the panel goes to the right. The pre-close layout isn't remembered.
+  - Keep in the UI with the lid closed saves the profile for the externals only.
+  - Window placement when the panel turns off is up to the compositor (labwc moves each
+    window to the output nearest its centre, and back when the panel returns).
+  - Only logind's lid handling can be inhibited; anything else that suspends on the lid
+    (e.g. an acpid handler running `systemctl suspend`) must be turned off by the user.
 - Monitor identity in profiles: EDID make|model|serial; falls back to connector name when
   there is no serial.
 
@@ -62,6 +85,6 @@ Decisions made during development that aren't in the README.
 - `rsds-wayland`: wlroots backend.
 - `rsds-tui`: ratatui UI, generic over `Backend`.
 - `rsds-daemon`: hotplug/profile service, generic over `Backend`.
-- `rsds-logind`: logind/sysfs integration (backlight; later the lid inhibitor).
+- `rsds-logind`: logind/sysfs integration (backlight, lid state and inhibitor).
 - `rsds-w`: Wayland binary.
 - (to come) `rsds-x11`, `rsds-x`.

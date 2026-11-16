@@ -1,12 +1,12 @@
 # Key bindings
 
 The UI has an arrangement view at the top and panes along the bottom. The
-left-most pane picks a section, **Displays** or **Nightlight**; the UI starts in
+left-most pane picks a section, **Displays**, **Nightlight** or **Suspend**; the UI starts in
 the Displays section with the monitor list focused.
 
 - Displays section: **sections** · **displays** (pick a monitor) ·
   **settings** (pick a setting) · **options** (pick a value for that setting).
-- Nightlight section: **sections** · **settings** · **options**.
+- Nightlight and Suspend sections: **sections** · **settings** · **options**.
 
 ## Navigating the panes
 
@@ -25,8 +25,8 @@ immediately; nothing reaches the display server until you apply.
 slider, `↑` makes the panel brighter and `↓` dimmer in 5% steps, and the change
 takes effect immediately. It is not part of Apply, Reset or the revert countdown.
 
-**Nightlight** settings also take effect immediately (they are saved and applied
-by the daemon, `rsds-w daemon`, which must be running). Its temperature is a
+**Nightlight** and **Suspend** settings also take effect immediately (they are
+saved and applied by the daemon, `rsds-w daemon`, which must be running). Its temperature is a
 slider: `↑` cooler (less tint), `↓` warmer, in 100 K steps from 1900 K to 6500 K.
 
 The schedule's times use a picker with an hour column and a minute column:

@@ -20,7 +20,10 @@ use ratatui::{
     },
     layout::{Position, Rect},
 };
-use rsds_core::{Backend, OutputConfig, profile::Profiles};
+use rsds_core::{
+    Backend, OutputConfig,
+    profile::{Profiles, active_outputs},
+};
 use rustix::event::{PollFd, PollFlags, Timespec};
 
 /// Run the UI until the user quits.
@@ -40,7 +43,7 @@ enum Flow {
 
 fn event_loop<B: Backend>(terminal: &mut DefaultTerminal, backend: &mut B) -> io::Result<()> {
     let mut app = App::new(backend.outputs(), rsds_logind::Backlight::find());
-    app.load_nightlight();
+    app.load_settings();
     let stdin = io::stdin();
     // Start crossterm's event source now so it installs its SIGWINCH
     // handler; the signal interrupts poll() below and we pick up resizes.
@@ -112,8 +115,10 @@ fn perform<B: Backend>(app: &mut App, backend: &mut B, request: Request) {
             return;
         }
         Request::SaveProfile => {
+            // With the lid closed, this is the profile for the externals.
+            let outputs = active_outputs(backend.outputs(), rsds_logind::lid::is_closed());
             let saved = Profiles::load().and_then(|mut p| {
-                p.remember(backend.outputs());
+                p.remember(&outputs);
                 p.save()
             });
             if let Err(e) = saved {

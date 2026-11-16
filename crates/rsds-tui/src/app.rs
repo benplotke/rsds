@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use rsds_core::{
     Mode, Output, OutputConfig, Transform,
     nightlight::{self, Nightlight, TimeOfDay},
+    suspend::{LidClose, Suspend},
     layout::{self, Rect},
 };
 
@@ -75,7 +76,7 @@ impl Entry {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
-    /// The left-most pane: Displays / Nightlight.
+    /// The left-most pane: Displays / Nightlight / Suspend.
     Sections,
     /// The monitor list (Displays section only).
     Displays,
@@ -88,15 +89,17 @@ pub enum Focus {
 pub enum Section {
     Displays,
     Nightlight,
+    Suspend,
 }
 
-pub const SECTIONS: [Section; 2] = [Section::Displays, Section::Nightlight];
+pub const SECTIONS: [Section; 3] = [Section::Displays, Section::Nightlight, Section::Suspend];
 
 impl Section {
     pub fn label(self) -> &'static str {
         match self {
             Section::Displays => "Displays",
             Section::Nightlight => "Nightlight",
+            Section::Suspend => "Suspend",
         }
     }
 
@@ -104,7 +107,7 @@ impl Section {
     pub fn panes(self) -> &'static [Focus] {
         match self {
             Section::Displays => &[Focus::Sections, Focus::Displays, Focus::Settings, Focus::Options],
-            Section::Nightlight => &[Focus::Sections, Focus::Settings, Focus::Options],
+            Section::Nightlight | Section::Suspend => &[Focus::Sections, Focus::Settings, Focus::Options],
         }
     }
 }
@@ -124,6 +127,8 @@ pub enum Setting {
     Schedule,
     ScheduleStart,
     ScheduleEnd,
+    // Suspend section; applied immediately (saved for the daemon).
+    LidClose,
 }
 
 const NIGHTLIGHT_SETTINGS: [Setting; 5] = [
@@ -133,6 +138,8 @@ const NIGHTLIGHT_SETTINGS: [Setting; 5] = [
     Setting::ScheduleStart,
     Setting::ScheduleEnd,
 ];
+
+const SUSPEND_SETTINGS: [Setting; 1] = [Setting::LidClose];
 
 /// Colour temperature step for keys and the scroll wheel, in kelvin.
 pub const TEMPERATURE_STEP: u32 = 100;
@@ -212,6 +219,7 @@ pub enum Choice {
     Refresh(Mode),
     Orientation(Transform),
     Scale(f64),
+    LidClose(LidClose),
 }
 
 impl Choice {
@@ -223,6 +231,7 @@ impl Choice {
             Choice::Refresh(r) => mode.is_some_and(|m| m.same_as(&r)),
             Choice::Orientation(t) => t == e.pending.transform,
             Choice::Scale(s) => (s - e.pending.scale).abs() < 1e-6,
+            Choice::LidClose(_) => false,
         }
     }
 
@@ -248,6 +257,7 @@ impl Choice {
             Choice::Refresh(m) => format!("{:.3} Hz{rec}", m.refresh_hz()),
             Choice::Orientation(t) => orientation_label(t).into(),
             Choice::Scale(s) => format!("{}%", (s * 100.0).round()),
+            Choice::LidClose(l) => l.label().into(),
         }
     }
 }
@@ -374,7 +384,9 @@ pub struct App {
     pub section: Section,
     /// Nightlight settings, saved for the daemon on every change.
     pub nightlight: Nightlight,
-    /// Whether the daemon (which applies Nightlight) is running.
+    /// Suspend settings, saved for the daemon on every change.
+    pub suspend: Suspend,
+    /// Whether the daemon (which applies Nightlight and Suspend) is running.
     pub daemon_running: bool,
     pub setting: Setting,
     /// Column of the schedule's time picker that up/down and typing change.
@@ -413,6 +425,7 @@ impl App {
             focus: Focus::Displays,
             section: Section::Displays,
             nightlight: Nightlight::default(),
+            suspend: Suspend::default(),
             daemon_running: false,
             setting: Setting::Enabled,
             time_column: TimeColumn::Hour,
@@ -478,13 +491,23 @@ impl App {
         }
     }
 
-    /// Load the Nightlight settings and check for the daemon.
-    pub fn load_nightlight(&mut self) {
+    /// Load the Nightlight and Suspend settings and check for the daemon.
+    pub fn load_settings(&mut self) {
         match Nightlight::load() {
             Ok(n) => self.nightlight = n,
             Err(e) => self.status = Some(format!("Couldn't read Nightlight settings: {e}")),
         }
+        match Suspend::load() {
+            Ok(s) => self.suspend = s,
+            Err(e) => self.status = Some(format!("Couldn't read Suspend settings: {e}")),
+        }
         self.daemon_running = rsds_core::daemon_lock::is_running();
+    }
+
+    fn save_suspend(&mut self) {
+        if let Err(e) = self.suspend.save() {
+            self.status = Some(format!("Couldn't save Suspend settings: {e}"));
+        }
     }
 
     fn save_nightlight(&mut self) {
@@ -524,7 +547,7 @@ impl App {
     pub fn set_section(&mut self, section: Section) {
         if section != self.section {
             self.section = section;
-            if section == Section::Nightlight {
+            if section != Section::Displays {
                 self.daemon_running = rsds_core::daemon_lock::is_running();
             }
         }
@@ -628,8 +651,10 @@ impl App {
     /// Settings shown in the settings pane: for the selected monitor, or
     /// Nightlight's.
     pub fn settings(&self) -> Vec<Setting> {
-        if self.section == Section::Nightlight {
-            return NIGHTLIGHT_SETTINGS.to_vec();
+        match self.section {
+            Section::Nightlight => return NIGHTLIGHT_SETTINGS.to_vec(),
+            Section::Suspend => return SUSPEND_SETTINGS.to_vec(),
+            Section::Displays => {}
         }
         let mut v = DISPLAY_SETTINGS.to_vec();
         if self.backlight.is_some() && self.selected_entry().is_some_and(|e| e.live.is_internal()) {
@@ -667,8 +692,13 @@ impl App {
     /// The available values of the current setting for the selected
     /// monitor, in display order, and the index of the pending value.
     pub fn choices(&self) -> (Vec<Choice>, Option<usize>) {
-        if self.section == Section::Nightlight {
-            return self.nightlight_choices();
+        match self.section {
+            Section::Nightlight => return self.nightlight_choices(),
+            Section::Suspend => {
+                let current = LidClose::ALL.iter().position(|l| *l == self.suspend.lid_close);
+                return (LidClose::ALL.into_iter().map(Choice::LidClose).collect(), current);
+            }
+            Section::Displays => {}
         }
         let Some(e) = self.selected_entry() else { return (Vec::new(), None) };
         let setting = self.current_setting();
@@ -787,6 +817,11 @@ impl App {
             self.save_nightlight();
             return;
         }
+        if let Choice::LidClose(l) = choice {
+            self.suspend.lid_close = l;
+            self.save_suspend();
+            return;
+        }
         let i = self.selected;
         let before = self.entries[i].rect();
         let e = &mut self.entries[i];
@@ -813,6 +848,8 @@ impl App {
                     .or(modes.last())
                     .copied();
             }
+            // Handled above: not a monitor setting.
+            Choice::LidClose(_) => return,
             Choice::Refresh(mode) => {
                 e.pending.mode = Some(mode);
                 return; // size unchanged

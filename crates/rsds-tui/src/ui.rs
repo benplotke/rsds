@@ -61,7 +61,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 (Focus::Options, options),
             ];
         }
-        Section::Nightlight => {
+        Section::Nightlight | Section::Suspend => {
             let [sections, settings, options] = Layout::horizontal([
                 Constraint::Length(SECTIONS_W),
                 Constraint::Length(SETTINGS_W),
@@ -293,11 +293,12 @@ fn draw_settings(f: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::Settings;
     let title = match (app.section, app.selected_entry()) {
         (Section::Nightlight, _) => "nightlight".into(),
+        (Section::Suspend, _) => "suspend".into(),
         (Section::Displays, Some(e)) => format!("settings: {} {}", e.number, e.live.name),
         (Section::Displays, None) => "settings".into(),
     };
     let mut block = boxed(&title, SETTINGS_BOX, focused);
-    if app.section == Section::Nightlight && !app.daemon_running {
+    if app.section != Section::Displays && !app.daemon_running {
         block = block.title(Line::styled(" daemon not running ", Style::new().fg(WARN)).right_aligned());
     }
     let inner = block.inner(area);
@@ -450,6 +451,7 @@ fn setting_text(app: &App, s: Setting) -> (&'static str, String, bool) {
         Setting::Schedule => return ("Schedule", on_off(n.schedule), true),
         Setting::ScheduleStart => return ("Turn on at", n.start.to_string(), n.schedule),
         Setting::ScheduleEnd => return ("Turn off at", n.end.to_string(), n.schedule),
+        Setting::LidClose => return ("Lid close", app.suspend.lid_close.label().into(), true),
         _ => {}
     }
     let Some(e) = app.selected_entry() else { return ("", String::new(), false) };

@@ -36,6 +36,7 @@ struct HeadState {
 pub(crate) struct State {
     pub(crate) identify: crate::identify::Identify,
     pub(crate) gamma: crate::gamma::Gamma,
+    pub(crate) power: crate::power::Power,
     heads: Vec<HeadState>,
     modes: Vec<ModeState>,
     /// Snapshot of `heads` taken at the last `done` event.
@@ -164,6 +165,10 @@ impl Backend for WaylandBackend {
     fn set_color_temperature(&mut self, kelvin: Option<u32>) -> Result<(), Error> {
         crate::gamma::set(&mut self.state, &self.qh, &self.globals, kelvin)?;
         self.queue.flush().map_err(Self::connection_error)
+    }
+
+    fn set_power(&mut self, output: &str, on: bool) -> Result<(), Error> {
+        crate::power::set(&mut self.state, &mut self.queue, &self.qh, &self.globals, output, on)
     }
 }
 
