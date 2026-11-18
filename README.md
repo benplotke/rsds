@@ -38,7 +38,7 @@ Computers should do what we want, and no more. Programs should do what they do w
 
 ## Lid Close Options
 Because we need to handle the common desired behavior around closing the lid while docked, we added full control of the lid behavior, even though there is some overlap with other systems.
-1. Always suspend on lid close - prevent systemd from suspending on lid close.
+1. Always suspend on lid close - closing the lid suspends, even if external monitors are attached.
 2. Suspend unless docked - closing the lid while external monitors are attached does not suspend the computer, rather reconfigures to just the external monitors
 3. Never suspend - if not docked, turn off the display, else, perform like option 2.
 4. System default - We don't influence suspend, but do reconfigure displays if needed

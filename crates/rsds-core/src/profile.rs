@@ -21,9 +21,25 @@ pub struct Profile {
     /// Sorted identities of the monitors in this set (see `Output::identity`).
     pub monitors: Vec<String>,
     pub outputs: Vec<SavedOutput>,
+    /// Places to go back to for monitors that are off or duplicating.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub restores: Vec<SavedRestore>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The arrangement before a monitor left it (was turned off or made a
+/// duplicate), so it can go back to its place when it returns, as long as
+/// the others haven't been changed since.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SavedRestore {
+    /// Identity of the monitor that left.
+    pub identity: String,
+    /// Every monitor before it left.
+    pub before: Vec<SavedOutput>,
+    /// The other monitors right after it left.
+    pub after: Vec<SavedOutput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SavedOutput {
     pub identity: String,
     /// `config.name` is the connector at the time of saving; it is replaced
@@ -143,8 +159,8 @@ impl Profiles {
 
     /// Record the current state of `outputs` as the profile for their set.
     /// `hint` says which output each one duplicates, where known (see
-    /// [`duplicate_sources`]).
-    pub fn remember(&mut self, outputs: &[Output], hint: &[Option<usize>]) {
+    /// [`duplicate_sources`]). `restores` are the places to go back to.
+    pub fn remember(&mut self, outputs: &[Output], hint: &[Option<usize>], restores: Vec<SavedRestore>) {
         let sources = duplicate_sources(outputs, hint);
         let profile = Profile {
             monitors: monitor_set(outputs),
@@ -157,6 +173,7 @@ impl Profiles {
                     duplicates: source.map(|s| outputs[s].identity()),
                 })
                 .collect(),
+            restores,
         };
         match self.profiles.iter_mut().find(|p| p.monitors == profile.monitors) {
             Some(p) => *p = profile,
@@ -191,7 +208,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rsds-test-{}", std::process::id()));
         let path = dir.join("profiles.json");
         let mut p = Profiles::default();
-        p.remember(&[output("DP-1", "A", 0), output("DP-2", "B", 1920)], &[]);
+        p.remember(&[output("DP-1", "A", 0), output("DP-2", "B", 1920)], &[], Vec::new());
         p.save_to(&path).unwrap();
         let loaded = Profiles::load_from(&path).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
@@ -208,8 +225,8 @@ mod tests {
     #[test]
     fn remember_replaces_same_set() {
         let mut p = Profiles::default();
-        p.remember(&[output("DP-1", "A", 0)], &[]);
-        p.remember(&[output("DP-1", "A", 100)], &[]);
+        p.remember(&[output("DP-1", "A", 0)], &[], Vec::new());
+        p.remember(&[output("DP-1", "A", 100)], &[], Vec::new());
         assert_eq!(p.profiles.len(), 1);
         assert_eq!(p.profiles[0].outputs[0].config.position, (100, 0));
     }
@@ -219,7 +236,7 @@ mod tests {
         // Same size, so only the hint can tell: B duplicates A.
         let outputs = [output("DP-1", "A", 0), output("DP-2", "B", 0)];
         let mut p = Profiles::default();
-        p.remember(&outputs, &[Some(1), None]);
+        p.remember(&outputs, &[Some(1), None], Vec::new());
         let profile = p.find(&outputs).unwrap();
         assert_eq!(profile.duplicate_sources(&outputs), vec![Some(1), None]);
     }

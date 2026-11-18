@@ -7,11 +7,13 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Clear, Paragraph},
+    widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap},
 };
-use rsds_core::layout::Rect as LRect;
+use rsds_core::{layout::Rect as LRect, lid_close::LidClose};
 
-use crate::app::{self, App, Choice, Entry, Focus, Hits, SECTIONS, Section, Setting, TimeColumn, View};
+use crate::app::{
+    self, App, Choice, Entry, Focus, Hits, SECTIONS, Section, Setting, TimeColumn, View,
+};
 
 // Colours loosely after btop's default theme.
 const FG: Color = Color::Rgb(0xcc, 0xcc, 0xcc);
@@ -24,15 +26,23 @@ const LIST_BOX: Color = Color::Rgb(0x5c, 0x58, 0x8d);
 const SETTINGS_BOX: Color = Color::Rgb(0x80, 0x52, 0x52);
 const OPTIONS_BOX: Color = Color::Rgb(0x6c, 0x6c, 0x4b);
 const SECTIONS_BOX: Color = Color::Rgb(0x4b, 0x6c, 0x6c);
+const INFO_BOX: Color = Color::Rgb(0x5c, 0x6c, 0x8d);
 const MONITOR: Color = Color::Rgb(0x90, 0x90, 0x90);
 const WARN: Color = Color::Rgb(0xe0, 0xb0, 0x40);
+/// The letter of a button that is also its key.
+const KEY: Color = Color::Rgb(0xff, 0x7a, 0x7a);
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     app.hits = Hits::default();
     // Keep the bottom height stable when switching sections.
     let display_settings = app::DISPLAY_SETTINGS.len() + app.backlight.is_some() as usize;
     // Odd, so the time picker's current row can sit exactly in the middle.
-    let rows = app.entries.len().max(display_settings).max(app.settings().len()) | 1;
+    let rows = app
+        .entries
+        .len()
+        .max(display_settings)
+        .max(app.settings().len())
+        | 1;
     let [top, bottom, footer] = Layout::vertical([
         Constraint::Min(8),
         Constraint::Length(rows as u16 + 2),
@@ -62,10 +72,15 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             ];
         }
         Section::LidClose => {
-            let [sections, options] =
-                Layout::horizontal([Constraint::Length(SECTIONS_W), Constraint::Min(20)]).areas(bottom);
+            let [sections, options, info] = Layout::horizontal([
+                Constraint::Length(SECTIONS_W),
+                Constraint::Length(LID_CLOSE_W),
+                Constraint::Min(20),
+            ])
+            .areas(bottom);
             draw_sections(f, app, sections);
             draw_options(f, app, options);
+            draw_lid_close_info(f, app, info);
             app.hits.panes = vec![(Focus::Sections, sections), (Focus::Options, options)];
         }
         Section::Nightlight => {
@@ -78,8 +93,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             draw_sections(f, app, sections);
             draw_settings(f, app, settings);
             draw_options(f, app, options);
-            app.hits.panes =
-                vec![(Focus::Sections, sections), (Focus::Settings, settings), (Focus::Options, options)];
+            app.hits.panes = vec![
+                (Focus::Sections, sections),
+                (Focus::Settings, settings),
+                (Focus::Options, options),
+            ];
         }
     }
     draw_footer(f, app, footer);
@@ -100,14 +118,55 @@ fn draw_sections(f: &mut Frame, app: &mut App, area: Rect) {
         if i as u16 >= inner.height {
             break;
         }
-        let row = Rect { y: inner.y + i as u16, height: 1, ..inner };
+        let row = Rect {
+            y: inner.y + i as u16,
+            height: 1,
+            ..inner
+        };
         let mut style = Style::new().fg(FG);
         if *section == app.section {
-            style = style.bg(if focused { SELECTED_BG } else { UNFOCUSED_BG }).add_modifier(Modifier::BOLD);
+            style = style
+                .bg(if focused { SELECTED_BG } else { UNFOCUSED_BG })
+                .add_modifier(Modifier::BOLD);
         }
-        f.render_widget(Paragraph::new(pad_to(&format!(" {}", section.label()), row.width)).style(style), row);
+        f.render_widget(
+            Paragraph::new(pad_to(&format!(" {}", section.label()), row.width)).style(style),
+            row,
+        );
         app.hits.section_rows.push((*section, row));
     }
+}
+
+/// Width of the Lid Close choices pane.
+const LID_CLOSE_W: u16 = 28;
+
+/// What the chosen Lid Close option does.
+fn lid_close_info(l: LidClose) -> &'static str {
+    match l {
+        LidClose::Suspend => {
+            "Closing the lid suspends the computer, even with external monitors connected."
+        }
+        LidClose::SuspendUnlessDocked => {
+            "Closing the lid suspends the computer, unless an external monitor is connected, \
+             in which case only the built-in display turns off."
+        }
+        LidClose::Never => {
+            "Closing the lid never suspends the computer. The built-in display just goes dark."
+        }
+        LidClose::SystemDefault => {
+            "Whether closing the lid suspends is left to the system, e.g. HandleLidSwitch in \
+             /etc/systemd/logind.conf."
+        }
+    }
+}
+
+fn draw_lid_close_info(f: &mut Frame, app: &App, area: Rect) {
+    let block = boxed("info", INFO_BOX, false).padding(Padding::horizontal(1));
+    let text = Paragraph::new(lid_close_info(app.lid_close.lid_close))
+        .style(Style::new().fg(FG))
+        .wrap(Wrap { trim: true })
+        .block(block);
+    f.render_widget(text, area);
 }
 
 fn boxed(title: &str, color: Color, focused: bool) -> Block<'_> {
@@ -175,7 +234,11 @@ fn draw_arrangement(f: &mut Frame, app: &mut App, area: Rect) {
         let e = &app.entries[i];
         let body = if Some(i) == dragged {
             let block = Block::bordered()
-                .border_type(if i == selected { BorderType::Thick } else { BorderType::Rounded })
+                .border_type(if i == selected {
+                    BorderType::Thick
+                } else {
+                    BorderType::Rounded
+                })
                 .border_style(Style::new().fg(WARN));
             let body = block.inner(cells);
             f.render_widget(Clear, cells);
@@ -186,27 +249,43 @@ fn draw_arrangement(f: &mut Frame, app: &mut App, area: Rect) {
         };
 
         // A source and its duplicates, e.g. "1 | 3" and "eDP-1 | DP-6".
-        let shown: Vec<&Entry> =
-            std::iter::once(e).chain(app.duplicates_of(i).into_iter().map(|j| &app.entries[j])).collect();
-        let join = |f: fn(&Entry) -> String| shown.iter().map(|x| f(x)).collect::<Vec<_>>().join(" | ");
+        let shown: Vec<&Entry> = std::iter::once(e)
+            .chain(app.duplicates_of(i).into_iter().map(|j| &app.entries[j]))
+            .collect();
+        let join =
+            |f: fn(&Entry) -> String| shown.iter().map(|x| f(x)).collect::<Vec<_>>().join(" | ");
         let mut lines = vec![
-            Line::styled(join(|x| x.number.to_string()), Style::new().fg(TITLE).add_modifier(Modifier::BOLD)),
+            Line::styled(
+                join(|x| x.number.to_string()),
+                Style::new().fg(TITLE).add_modifier(Modifier::BOLD),
+            ),
             Line::styled(join(|x| x.live.name.clone()), Style::new().fg(FG)),
         ];
         if let Some(m) = e.pending.mode {
-            lines.push(Line::styled(format!("{}×{}", m.width, m.height), Style::new().fg(INACTIVE)));
+            lines.push(Line::styled(
+                format!("{}×{}", m.width, m.height),
+                Style::new().fg(INACTIVE),
+            ));
         }
         lines.truncate(body.height as usize);
         let pad = body.height.saturating_sub(lines.len() as u16) / 2;
-        let text_area = Rect { y: body.y + pad, height: body.height - pad, ..body };
-        f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), text_area);
+        let text_area = Rect {
+            y: body.y + pad,
+            height: body.height - pad,
+            ..body
+        };
+        f.render_widget(
+            Paragraph::new(lines).alignment(Alignment::Center),
+            text_area,
+        );
         app.hits.monitors.push((i, cells));
     }
 }
 
 /// Box-drawing glyphs indexed by arm weights (0 none, 1 light, 2 heavy) as
 /// `up * 27 + down * 9 + left * 3 + right`.
-const GLYPHS: &str = " ╶╺╴─╼╸╾━╷┌┍┐┬┮┑┭┯╻┎┏┒┰┲┓┱┳╵└┕┘┴┶┙┵┷│├┝┤┼┾┥┽┿╽┟┢┧╁╆┪╅╈╹┖┗┚┸┺┛┹┻╿┞┡┦╀╄┩╃╇┃┠┣┨╂╊┫╉╋";
+const GLYPHS: &str =
+    " ╶╺╴─╼╸╾━╷┌┍┐┬┮┑┭┯╻┎┏┒┰┲┓┱┳╵└┕┘┴┶┙┵┷│├┝┤┼┾┥┽┿╽┟┢┧╁╆┪╅╈╹┖┗┚┸┺┛┹┻╿┞┡┦╀╄┩╃╇┃┠┣┨╂╊┫╉╋";
 
 /// One cell of a [`BorderGrid`].
 #[derive(Default)]
@@ -266,7 +345,10 @@ impl BorderGrid {
                 [0, 1, 1, 0] => '╮',
                 [1, 0, 0, 1] => '╰',
                 [1, 0, 1, 0] => '╯',
-                _ => GLYPHS.chars().nth((u * 27 + d * 9 + l * 3 + r) as usize).unwrap_or(' '),
+                _ => GLYPHS
+                    .chars()
+                    .nth((u * 27 + d * 9 + l * 3 + r) as usize)
+                    .unwrap_or(' '),
             };
             let color = j.color.map_or(MONITOR, |(_, c)| c);
             if let Some(cell) = buf.cell_mut((x, y)) {
@@ -286,7 +368,11 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
         if i as u16 >= inner.height {
             break;
         }
-        let row = Rect { y: inner.y + i as u16, height: 1, ..inner };
+        let row = Rect {
+            y: inner.y + i as u16,
+            height: 1,
+            ..inner
+        };
         let name = format!("{} {}", e.live.make, e.live.model);
         let dirty = if e.is_dirty() { "*" } else { " " };
         let source = app.source_of(i).map(|s| app.entries[s].number);
@@ -333,7 +419,11 @@ fn draw_settings(f: &mut Frame, app: &mut App, area: Rect) {
         if i as u16 >= inner.height {
             break;
         }
-        let row = Rect { y: inner.y + i as u16, height: 1, ..inner };
+        let row = Rect {
+            y: inner.y + i as u16,
+            height: 1,
+            ..inner
+        };
         let (label, value, active) = setting_text(app, setting);
         let mut label_style = Style::new().fg(if active { FG } else { INACTIVE });
         let mut value_style = Style::new().fg(if active { TITLE } else { INACTIVE });
@@ -345,7 +435,10 @@ fn draw_settings(f: &mut Frame, app: &mut App, area: Rect) {
         let label = format!(" {label:<LABEL_W$}");
         let value = pad_to(&value, row.width.saturating_sub(LABEL_W as u16 + 1));
         f.render_widget(
-            Paragraph::new(Line::from(vec![Span::styled(label, label_style), Span::styled(value, value_style)])),
+            Paragraph::new(Line::from(vec![
+                Span::styled(label, label_style),
+                Span::styled(value, value_style),
+            ])),
             row,
         );
         rows.push((setting, row));
@@ -371,11 +464,25 @@ fn draw_options(f: &mut Frame, app: &mut App, area: Rect) {
     }
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let area = Rect { x: inner.x + 1, width: inner.width.saturating_sub(2), ..inner };
+    let area = Rect {
+        x: inner.x + 1,
+        width: inner.width.saturating_sub(2),
+        ..inner
+    };
     match setting {
         Setting::Brightness => {
-            let Some(p) = app.brightness().filter(|_| active) else { return };
-            draw_slider(f, app, area, p as f64 / 100.0, format!("{p}%"), "brighter", "dimmer");
+            let Some(p) = app.brightness().filter(|_| active) else {
+                return;
+            };
+            draw_slider(
+                f,
+                app,
+                area,
+                p as f64 / 100.0,
+                format!("{p}%"),
+                "brighter",
+                "dimmer",
+            );
         }
         Setting::Temperature => {
             let k = app.nightlight.temperature;
@@ -388,7 +495,11 @@ fn draw_options(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 /// Colours of the time picker's values by distance from the current one.
-const TIME_FADE: [Color; 3] = [TITLE, Color::Rgb(0x8a, 0x8a, 0x8a), Color::Rgb(0x4a, 0x4a, 0x4a)];
+const TIME_FADE: [Color; 3] = [
+    TITLE,
+    Color::Rgb(0x8a, 0x8a, 0x8a),
+    Color::Rgb(0x4a, 0x4a, 0x4a),
+];
 
 /// Hour and minute columns with the current time centred and its
 /// neighbours fading out above and below.
@@ -417,11 +528,18 @@ fn draw_time_picker(f: &mut Frame, app: &mut App, area: Rect) {
             };
             let mut style = Style::new().fg(TIME_FADE[offset.unsigned_abs() as usize]);
             if offset == 0 {
-                let bg = if focused && app.time_column == column { SELECTED_BG } else { UNFOCUSED_BG };
+                let bg = if focused && app.time_column == column {
+                    SELECTED_BG
+                } else {
+                    UNFOCUSED_BG
+                };
                 style = style.bg(bg).add_modifier(Modifier::BOLD);
             }
             let cell = Rect::new(x, y as u16, CELL_W, 1);
-            f.render_widget(Paragraph::new(Span::styled(format!(" {value:02} "), style)), cell);
+            f.render_widget(
+                Paragraph::new(Span::styled(format!(" {value:02} "), style)),
+                cell,
+            );
             hits.push((column, value, cell));
         }
     }
@@ -432,7 +550,15 @@ fn draw_time_picker(f: &mut Frame, app: &mut App, area: Rect) {
 
 /// A vertical slider on the left of the pane, filled from the bottom in
 /// half-row steps, with the value and a key hint beside it.
-fn draw_slider(f: &mut Frame, app: &mut App, area: Rect, fraction: f64, value: String, up: &str, down: &str) {
+fn draw_slider(
+    f: &mut Frame,
+    app: &mut App,
+    area: Rect,
+    fraction: f64,
+    value: String,
+    up: &str,
+    down: &str,
+) {
     if area.width < 4 || area.height == 0 {
         return;
     }
@@ -465,7 +591,10 @@ fn draw_slider(f: &mut Frame, app: &mut App, area: Rect, fraction: f64, value: S
             Span::styled("↑", key),
             Span::styled(format!(" {up}  "), Style::new().fg(INACTIVE)),
             Span::styled("↓", key),
-            Span::styled(format!(" {down}  · applies immediately"), Style::new().fg(INACTIVE)),
+            Span::styled(
+                format!(" {down}  · applies immediately"),
+                Style::new().fg(INACTIVE),
+            ),
         ]);
         f.render_widget(Paragraph::new(hint), Rect::new(text_x, mid + 2, text_w, 1));
     }
@@ -486,14 +615,19 @@ fn setting_text(app: &App, s: Setting) -> (&'static str, String, bool) {
         Setting::LidClose => return ("Lid close", app.lid_close.lid_close.label().into(), true),
         _ => {}
     }
-    let Some(e) = app.selected_entry() else { return ("", String::new(), false) };
+    let Some(e) = app.selected_entry() else {
+        return ("", String::new(), false);
+    };
     let on = e.pending.enabled;
     let mode = e.pending.mode.filter(|_| on);
     let active = on || s == Setting::Enabled;
     let value = match s {
         Setting::Enabled => Some(Choice::Enabled(on)),
         Setting::Brightness => {
-            let value = app.brightness().filter(|_| on).map_or_else(|| "—".into(), |p| format!("{p}%"));
+            let value = app
+                .brightness()
+                .filter(|_| on)
+                .map_or_else(|| "—".into(), |p| format!("{p}%"));
             return ("Brightness", value, active);
         }
         Setting::Resolution => mode.map(|m| Choice::Resolution((m.width, m.height))),
@@ -502,7 +636,11 @@ fn setting_text(app: &App, s: Setting) -> (&'static str, String, bool) {
         Setting::Scale => on.then_some(Choice::Scale(e.pending.scale)),
         Setting::Duplicate => {
             let source = app.source_of(app.selected).map(|s| app.entries[s].number);
-            let value = if on { app.choice_label(&Choice::Duplicate(source), e, false) } else { "—".into() };
+            let value = if on {
+                app.choice_label(&Choice::Duplicate(source), e, false)
+            } else {
+                "—".into()
+            };
             return ("Duplicate", value, active);
         }
         _ => None,
@@ -516,7 +654,11 @@ fn setting_text(app: &App, s: Setting) -> (&'static str, String, bool) {
         Setting::Orientation => "Orientation",
         _ => "Scale",
     };
-    (label, value.map_or_else(|| "—".into(), |c| c.label(e, false)), active)
+    (
+        label,
+        value.map_or_else(|| "—".into(), |c| c.label(e, false)),
+        active,
+    )
 }
 
 fn on_off(on: bool) -> String {
@@ -526,12 +668,17 @@ fn on_off(on: bool) -> String {
 /// All choices for the focused setting, laid out in columns that flow top
 /// to bottom. Scrolls horizontally to keep the current choice visible.
 fn draw_choices(f: &mut Frame, app: &mut App, area: Rect) {
-    let Some(e) = app.selected_entry() else { return };
+    let Some(e) = app.selected_entry() else {
+        return;
+    };
     let (choices, current) = app.choices();
     if choices.is_empty() || area.width < 4 || area.height == 0 {
         return;
     }
-    let labels: Vec<String> = choices.iter().map(|c| app.choice_label(c, e, true)).collect();
+    let labels: Vec<String> = choices
+        .iter()
+        .map(|c| app.choice_label(c, e, true))
+        .collect();
     let col_w = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16 + 4;
     let rows = area.height as usize;
     let total_cols = labels.len().div_ceil(rows);
@@ -550,7 +697,11 @@ fn draw_choices(f: &mut Frame, app: &mut App, area: Rect) {
         let cell = Rect::new(x, area.y + (i % rows) as u16, w, 1);
         let fg = if choices[i].is_recommended(e) { HI } else { FG };
         let style = if Some(i) == current {
-            let bg = if app.focus == Focus::Options { SELECTED_BG } else { UNFOCUSED_BG };
+            let bg = if app.focus == Focus::Options {
+                SELECTED_BG
+            } else {
+                UNFOCUSED_BG
+            };
             Style::new().fg(TITLE).bg(bg).add_modifier(Modifier::BOLD)
         } else {
             Style::new().fg(fg)
@@ -562,7 +713,10 @@ fn draw_choices(f: &mut Frame, app: &mut App, area: Rect) {
     // Arrows hint that more choices are scrolled out of view.
     let more = Style::new().fg(HI);
     if first_col > 0 {
-        f.render_widget(Paragraph::new(Span::styled("‹", more)), Rect::new(area.x, area.y, 1, 1));
+        f.render_widget(
+            Paragraph::new(Span::styled("‹", more)),
+            Rect::new(area.x, area.y, 1, 1),
+        );
     }
     if first_col + visible_cols < total_cols {
         let r = Rect::new(area.right() - 1, area.y, 1, 1);
@@ -571,71 +725,129 @@ fn draw_choices(f: &mut Frame, app: &mut App, area: Rect) {
     app.hits.choices = hits;
 }
 
+/// A button reading ` label `, its first letter (its key) picked out
+/// unless the button is `dim`, and its width.
+fn button(label: &'static str, style: Style, dim: bool) -> (Vec<Span<'static>>, u16) {
+    let (first, rest) = label.split_at(1);
+    let first_style = if dim {
+        style
+    } else {
+        style.fg(KEY).add_modifier(Modifier::BOLD)
+    };
+    let spans = vec![
+        Span::styled(" ", style),
+        Span::styled(first, first_style),
+        Span::styled(format!("{rest} "), style),
+    ];
+    (spans, label.len() as u16 + 2)
+}
+
 fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
     let dirty = app.is_dirty();
-    let key = Style::new().fg(HI).add_modifier(Modifier::BOLD);
     let text = Style::new().fg(FG);
     let dim = Style::new().fg(INACTIVE);
-    let apply_style = if dirty { Style::new().fg(TITLE).bg(SELECTED_BG).add_modifier(Modifier::BOLD) } else { dim };
+    let apply_style = if dirty {
+        Style::new()
+            .fg(TITLE)
+            .bg(SELECTED_BG)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        dim
+    };
     let reset_style = if dirty { text } else { dim };
 
-    let spans = vec![
-        Span::raw(" "),
-        Span::styled(" Apply ", apply_style),
-        Span::raw(" "),
-        Span::styled(" Reset ", reset_style),
-        Span::raw(" "),
-        Span::styled(" Identify ", text),
-        Span::raw("   "),
-        Span::styled("a", key),
-        Span::styled(" apply  ", text),
-        Span::styled("r", key),
-        Span::styled(" reset  ", text),
-        Span::styled("i", key),
-        Span::styled(" identify  ", text),
-        Span::styled("↑↓", key),
-        Span::styled(" select  ", text),
-        Span::styled("←→", key),
-        Span::styled(" pane  ", text),
-        Span::styled("q", key),
-        Span::styled(" quit", text),
+    let buttons = [
+        ("apply", apply_style, !dirty),
+        ("reset", reset_style, !dirty),
+        ("identify", text, false),
+        ("quit", text, false),
     ];
-    app.hits.apply = Some(Rect { x: area.x + 1, width: 7, ..area });
-    app.hits.reset = Some(Rect { x: area.x + 9, width: 7, ..area });
-    app.hits.identify = Some(Rect { x: area.x + 17, width: 10, ..area });
+    let mut spans = Vec::new();
+    let mut hits = Vec::new();
+    let mut x = area.x;
+    for (label, style, dim) in buttons {
+        let (b, w) = button(label, style, dim);
+        spans.push(Span::raw(" "));
+        spans.extend(b);
+        hits.push(Rect {
+            x: x + 1,
+            width: w,
+            ..area
+        });
+        x += w + 1;
+    }
+    app.hits.apply = Some(hits[0]);
+    app.hits.reset = Some(hits[1]);
+    app.hits.identify = Some(hits[2]);
+    app.hits.quit = Some(hits[3]);
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 
     if let Some(msg) = &app.status {
         let w = (msg.chars().count() as u16 + 1).min(area.width);
-        let r = Rect { x: area.right() - w, width: w, ..area };
-        f.render_widget(Paragraph::new(Span::styled(msg.as_str(), Style::new().fg(WARN))), r);
+        let r = Rect {
+            x: area.right() - w,
+            width: w,
+            ..area
+        };
+        f.render_widget(
+            Paragraph::new(Span::styled(msg.as_str(), Style::new().fg(WARN))),
+            r,
+        );
     }
 }
 
 fn draw_confirm(f: &mut Frame, app: &mut App) {
     let Some(c) = &app.confirm else { return };
-    let secs = c.deadline.saturating_duration_since(Instant::now()).as_secs_f64().ceil() as u64;
+    let secs = c
+        .deadline
+        .saturating_duration_since(Instant::now())
+        .as_secs_f64()
+        .ceil() as u64;
     let area = f.area();
     let (w, h) = (44u16.min(area.width), 6u16.min(area.height));
-    let r = Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h);
+    let r = Rect::new(
+        area.x + (area.width - w) / 2,
+        area.y + (area.height - h) / 2,
+        w,
+        h,
+    );
     f.render_widget(Clear, r);
     let block = boxed("confirm", HI, true);
     let inner = block.inner(r);
     f.render_widget(block, r);
 
     let lines = vec![
-        Line::styled("Keep these display settings?", Style::new().fg(TITLE).add_modifier(Modifier::BOLD)),
+        Line::styled(
+            "Keep these display settings?",
+            Style::new().fg(TITLE).add_modifier(Modifier::BOLD),
+        ),
         Line::styled(format!("Reverting in {secs} s"), Style::new().fg(WARN)),
         Line::raw(""),
-        Line::from(vec![
-            Span::styled(" Keep ", Style::new().fg(TITLE).bg(SELECTED_BG).add_modifier(Modifier::BOLD)),
-            Span::raw("    "),
-            Span::styled(" Revert ", Style::new().fg(FG).bg(Color::Rgb(0x30, 0x30, 0x30))),
-        ]),
+        Line::from(
+            [
+                button(
+                    "keep",
+                    Style::new()
+                        .fg(TITLE)
+                        .bg(SELECTED_BG)
+                        .add_modifier(Modifier::BOLD),
+                    false,
+                )
+                .0,
+                vec![Span::raw("    ")],
+                button(
+                    "revert",
+                    Style::new().fg(FG).bg(Color::Rgb(0x30, 0x30, 0x30)),
+                    false,
+                )
+                .0,
+            ]
+            .concat(),
+        ),
     ];
     f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
 
-    // Buttons line is centred: " Keep " (6) + 4 spaces + " Revert " (8) = 18.
+    // Buttons line is centred: " keep " (6) + 4 spaces + " revert " (8) = 18.
     if inner.height >= 4 {
         let y = inner.y + 3;
         let x0 = inner.x + inner.width.saturating_sub(18) / 2;

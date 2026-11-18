@@ -8,7 +8,7 @@ use rsds_core::{
     lid_close::{LidClose, LidCloseSettings},
     layout::{self, Rect},
     mirror,
-    profile::{Profile, active_outputs, duplicate_sources, monitor_set},
+    profile::{Profile, SavedOutput, SavedRestore, active_outputs, duplicate_sources, monitor_set},
     unconfirmed,
 };
 
@@ -400,6 +400,7 @@ pub struct Hits {
     pub keep: Option<ratatui::layout::Rect>,
     pub revert: Option<ratatui::layout::Rect>,
     pub identify: Option<ratatui::layout::Rect>,
+    pub quit: Option<ratatui::layout::Rect>,
 }
 
 pub struct App {
@@ -434,6 +435,11 @@ pub struct App {
     /// Identities of the monitors in use (see `active_outputs`), to notice
     /// monitors coming and going (including the panel when the lid closes).
     monitor_set: Vec<String>,
+    /// Places for monitors that are off or duplicating to go back to, in
+    /// the pending config.
+    restores: Vec<SavedRestore>,
+    /// The same for the kept config (as in the saved profile).
+    kept_restores: Vec<SavedRestore>,
 }
 
 impl App {
@@ -468,6 +474,8 @@ impl App {
             backlight,
             hits: Hits::default(),
             monitor_set: monitor_set(outputs),
+            restores: Vec::new(),
+            kept_restores: Vec::new(),
         }
     }
 
@@ -546,6 +554,10 @@ impl App {
                 e.duplicates = d;
             }
         }
+        self.kept_restores = profile.restores.clone();
+        if !self.is_dirty() {
+            self.restores = self.kept_restores.clone();
+        }
     }
 
     /// For each entry, the index of the output it duplicates, for saving
@@ -611,10 +623,93 @@ impl App {
         }
         let scale = e.pending.scale;
         e.pending.scale = SCALES.into_iter().min_by(|a, b| (a - scale).abs().total_cmp(&(b - scale).abs())).unwrap_or(1.0);
-        let others = self.other_rects(index);
-        let x = others.iter().map(Rect::right).max().unwrap_or(0);
-        let y = others.iter().map(|r| r.y).min().unwrap_or(0);
-        self.entries[index].pending.position = (x, y);
+        self.place_right(index);
+    }
+
+    /// Put entry `index` to the right of the others, centred on its
+    /// neighbour there.
+    fn place_right(&mut self, index: usize) {
+        let h = self.entries[index].rect().map_or(0, |r| r.h);
+        self.entries[index].pending.position = layout::place_right(&self.other_rects(index), h);
+    }
+
+    /// Identity of the monitor entry `index` duplicates, if any.
+    fn source_identity(&self, index: usize) -> Option<String> {
+        self.source_of(index).map(|s| self.entries[s].live.identity())
+    }
+
+    /// Every entry's pending config and source, leaving out `except`.
+    fn snapshot(&self, except: Option<usize>) -> Vec<SavedOutput> {
+        (0..self.entries.len())
+            .filter(|&j| Some(j) != except)
+            .map(|j| SavedOutput {
+                identity: self.entries[j].live.identity(),
+                config: self.entries[j].pending.clone(),
+                duplicates: self.source_identity(j),
+            })
+            .collect()
+    }
+
+    /// Entry `index` just left the arrangement, which was `before`.
+    fn record_leaving(&mut self, index: usize, before: Vec<SavedOutput>) {
+        let identity = self.entries[index].live.identity();
+        let after = self.snapshot(Some(index));
+        self.restores.retain(|r| r.identity != identity);
+        self.restores.push(SavedRestore { identity, before, after });
+    }
+
+    /// Whether the monitors other than the one `r` is for are where they
+    /// were right after it left, the same size and duplicating the same.
+    fn unchanged_since(&self, r: &SavedRestore) -> bool {
+        let others = || self.entries.iter().enumerate().filter(|(_, e)| e.live.identity() != r.identity);
+        r.after.iter().all(|s| self.entries.iter().any(|e| e.live.identity() == s.identity))
+            && others().all(|(j, e)| match r.after.iter().find(|s| s.identity == e.live.identity()) {
+                Some(s) => s.config.rect() == e.rect() && s.duplicates == self.source_identity(j),
+                // Not in the saved arrangement (the panel, with the lid
+                // closed), which is fine while it's off.
+                None => !e.pending.enabled,
+            })
+    }
+
+    /// Entry `index` is coming back to the arrangement: if nothing else
+    /// changed since it left, put it and the others back as they were.
+    /// Returns whether it did.
+    fn restore_place(&mut self, index: usize) -> bool {
+        let identity = self.entries[index].live.identity();
+        let Some(k) = self.restores.iter().position(|r| r.identity == identity) else { return false };
+        let r = self.restores.remove(k);
+        if !self.unchanged_since(&r) {
+            return false;
+        }
+        let names: Vec<(String, String)> =
+            self.entries.iter().map(|e| (e.live.identity(), e.live.name.clone())).collect();
+        let name_of = |id: &String| names.iter().find(|(i, _)| i == id).map(|(_, n)| n.clone());
+        for e in self.entries.iter_mut() {
+            let Some(saved) = r.before.iter().find(|s| s.identity == e.live.identity()) else { continue };
+            e.pending.position = saved.config.position;
+            e.pending.scale = saved.config.scale;
+            // Its other settings are as they are now.
+            if saved.identity != identity {
+                e.duplicates = saved.duplicates.as_ref().and_then(name_of);
+            }
+        }
+        true
+    }
+
+    /// Places to go back to, for a profile of `outputs`.
+    pub fn restores_for(&self, outputs: &[Output]) -> Vec<SavedRestore> {
+        let ids: Vec<String> = outputs.iter().map(Output::identity).collect();
+        let keep = |v: &[SavedOutput]| v.iter().filter(|s| ids.contains(&s.identity)).cloned().collect();
+        self.kept_restores
+            .iter()
+            .filter(|r| ids.contains(&r.identity))
+            .map(|r| SavedRestore { identity: r.identity.clone(), before: keep(&r.before), after: keep(&r.after) })
+            .collect()
+    }
+
+    /// Identities of the monitors in use.
+    pub fn monitor_set(&self) -> &[String] {
+        &self.monitor_set
     }
 
     /// Label of a choice, naming the monitor a Duplicate choice refers to.
@@ -1033,7 +1128,11 @@ impl App {
     /// duplicating. Monitors duplicating it then duplicate `target` too.
     fn set_duplicate(&mut self, index: usize, target: Option<usize>) {
         let Some(target) = target else {
-            self.stop_duplicating(index);
+            if self.entries[index].duplicates.is_some() && self.restore_place(index) {
+                self.entries[index].duplicates = None;
+            } else {
+                self.stop_duplicating(index);
+            }
             self.fixup_layout(index, None);
             return;
         };
@@ -1041,6 +1140,8 @@ impl App {
         if source == index || self.entries[source].duplicates.is_some() {
             return;
         }
+        let leaving = self.entries[index].duplicates.is_none();
+        let before = self.snapshot(None);
         let name = self.entries[source].live.name.clone();
         for j in self.duplicates_of(index) {
             self.entries[j].duplicates = Some(name.clone());
@@ -1048,23 +1149,34 @@ impl App {
         self.entries[index].duplicates = Some(name);
         // It leaves its place in the arrangement: close the gap.
         self.fixup_layout(source, None);
+        if leaving {
+            self.record_leaving(index, before);
+        }
     }
 
     pub fn toggle_enabled(&mut self) {
         let i = self.selected;
         let enabled_count = self.entries.iter().filter(|e| e.pending.enabled).count();
+        let before = self.snapshot(None);
         let Some(e) = self.entries.get_mut(i) else { return };
         if e.pending.enabled {
             if enabled_count <= 1 {
                 self.status = Some("Can't turn off the only active display".into());
                 return;
             }
+            // A duplicate already left the arrangement when it became one.
+            let leaving = e.duplicates.is_none();
             e.pending.enabled = false;
             e.duplicates = None;
             // Its duplicates become monitors of their own.
             for j in self.duplicates_of(i) {
                 self.stop_duplicating(j);
             }
+            self.fixup_layout(i, None);
+            if leaving {
+                self.record_leaving(i, before);
+            }
+            return;
         } else {
             e.pending.enabled = true;
             if e.pending.mode.is_none() {
@@ -1073,11 +1185,11 @@ impl App {
             if e.pending.scale <= 0.0 {
                 e.pending.scale = 1.0;
             }
-            // Turned-on monitors go to the right of the others.
-            let others: Vec<Rect> = self.other_rects(i);
-            let x = others.iter().map(Rect::right).max().unwrap_or(0);
-            let y = others.iter().map(|r| r.y).min().unwrap_or(0);
-            self.entries[i].pending.position = (x, y);
+            // Turned-on monitors go back to where they were, or else to
+            // the right of the others.
+            if !self.restore_place(i) {
+                self.place_right(i);
+            }
         }
         self.fixup_layout(i, None);
     }
@@ -1155,6 +1267,17 @@ impl App {
         self.entries[d.index].pending.position = (d.start_pos.0 + dx, d.start_pos.1 + dy);
     }
 
+    /// The monitor that entry `index`, at `r`, is dropped right on top of:
+    /// its centre is in the middle half (across and down) of that monitor.
+    fn drop_target(&self, index: usize, r: Rect) -> Option<usize> {
+        let (cx, cy) = (r.x + r.w / 2, r.y + r.h / 2);
+        (0..self.entries.len()).filter(|&j| j != index).find(|&j| {
+            self.layout_rect(j).is_some_and(|t| {
+                (cx - (t.x + t.w / 2)).abs() <= t.w / 4 && (cy - (t.y + t.h / 2)).abs() <= t.h / 4
+            })
+        })
+    }
+
     pub fn end_drag(&mut self) {
         let Some(d) = self.drag.take() else { return };
         let view = self.frozen_view.take();
@@ -1162,6 +1285,14 @@ impl App {
             return;
         }
         let Some(rect) = self.entries[d.index].rect() else { return };
+        if let Some(target) = self.drop_target(d.index, rect) {
+            // Back where it was first, so that it returns there if it
+            // stops duplicating.
+            self.entries[d.index].pending.position = d.start_pos;
+            let number = self.entries[target].number;
+            self.set_duplicate(d.index, Some(number));
+            return;
+        }
         let threshold = view.map_or((0, 0), View::snap_threshold);
         let snapped = layout::snap(rect, &self.other_rects(d.index), threshold);
         self.entries[d.index].pending.position = (snapped.x, snapped.y);
@@ -1170,6 +1301,12 @@ impl App {
 
     /// Discard unapplied edits.
     pub fn reset(&mut self) {
+        self.adopt_live();
+        self.restores = self.kept_restores.clone();
+    }
+
+    /// Make the pending config the live one, e.g. after applying it.
+    pub fn adopt_live(&mut self) {
         self.reset_pending();
         self.status = None;
     }
@@ -1186,6 +1323,10 @@ impl App {
         if self.confirm.is_some() || !self.is_dirty() {
             return None;
         }
+        // Places that are already gone stay gone, whatever the compositor
+        // does to the layout.
+        let restores = std::mem::take(&mut self.restores);
+        self.restores = restores.into_iter().filter(|r| self.unchanged_since(r)).collect();
         Some(Request::Apply(self.entries.iter().map(|e| e.pending.clone()).collect()))
     }
 
@@ -1203,12 +1344,20 @@ impl App {
     pub fn keep(&mut self) -> Request {
         self.confirm = None;
         unconfirmed::clear();
+        // The compositor may have rounded the layout a little.
+        for k in 0..self.restores.len() {
+            let identity = &self.restores[k].identity;
+            let index = self.entries.iter().position(|e| &e.live.identity() == identity);
+            self.restores[k].after = self.snapshot(index);
+        }
+        self.kept_restores = self.restores.clone();
         Request::SaveProfile
     }
 
     pub fn revert(&mut self) -> Option<Request> {
         let c = self.confirm.take()?;
         unconfirmed::clear();
+        self.restores = self.kept_restores.clone();
         for e in &mut self.entries {
             if let Some(p) = c.previous.iter().find(|p| p.name == e.pending.name) {
                 e.pending = p.clone();
@@ -1243,6 +1392,9 @@ impl App {
         self.drag = None;
         self.frozen_view = None;
         self.reset_pending();
+        // The new set's places come with its profile (see `use_profile`).
+        self.restores.clear();
+        self.kept_restores.clear();
         let previous = confirm?.previous;
         if rsds_core::daemon_lock::is_running() {
             return None;

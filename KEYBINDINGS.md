@@ -15,7 +15,7 @@ the Displays section with the monitor list focused.
 |---|---|---|---|---|
 | `↑` / `k` | previous section | previous monitor | previous setting | previous option |
 | `↓` / `j` | next section | next monitor | next setting | next option |
-| `→` / `l` / `Enter` | pane to the right | pane to the right | go to options | — |
+| `→` / `l` | pane to the right | pane to the right | go to options | — |
 | `←` / `h` | — | go to sections | pane to the left | go to settings |
 | `Tab` / `Shift`+`Tab` | cycle forwards / backwards through the section's panes | | | |
 
@@ -40,7 +40,7 @@ The schedule's times use a picker with an hour column and a minute column:
 |---|---|---|
 | `↑` / `k` | one hour earlier | five minutes earlier |
 | `↓` / `j` | one hour later | five minutes later |
-| `→` / `l` / `Enter` | go to the minute column | — |
+| `→` / `l` | go to the minute column | — |
 | `←` / `h` | go to settings | go to the hour column |
 | `0`–`9` | type the hour; after two digits typing continues in the minute column | type the minutes |
 
@@ -48,21 +48,25 @@ A typed value that is too large becomes the largest valid one (23 or 59).
 
 ## Actions
 
+These are the buttons along the bottom; the highlighted first letter of each
+is its key.
+
 | Key | Action |
 |---|---|
-| `a` | Apply pending changes |
+| `a` / `Enter` | Apply pending changes |
 | `r` | Reset: discard pending changes |
 | `i` | Identify: show each monitor's number on it for 3 seconds |
 | `q` / `Ctrl`+`c` | Quit (reverts first if a confirmation is pending) |
 
 ## "Keep these display settings?" dialog
 
-Shown after applying. Reverts automatically after 15 seconds.
+Shown after applying. Reverts automatically after 15 seconds. The highlighted
+first letter of each button is its key.
 
 | Key | Action |
 |---|---|
 | `Enter` / `y` / `k` | Keep (and save as the profile for the connected monitors) |
-| `Esc` / `n` | Revert now |
+| `r` / `Esc` / `n` | Revert now |
 | `q` / `Ctrl`+`c` | Revert and quit |
 
 ## Mouse
@@ -70,11 +74,12 @@ Shown after applying. Reverts automatically after 15 seconds.
 | Action | Effect |
 |---|---|
 | Drag a monitor in the arrangement | Move it; on release it snaps next to the others |
+| Drop a monitor right on top of another | Duplicate that monitor (its centre must land in the middle half of the other) |
 | Click a monitor or a row in the displays pane | Select that monitor |
 | Click a section | Switch to that section |
 | Click a setting | Select that setting |
 | Click an option | Choose that option (in the time picker, that hour or minute) |
 | Click or drag on a slider | Set brightness or temperature to that point |
 | Scroll wheel over a pane | Same as `↑` / `↓` in that pane |
-| Click **Apply** / **Reset** / **Identify** | Same as `a` / `r` / `i` |
-| Click **Keep** / **Revert** in the dialog | Keep or revert |
+| Click **apply** / **reset** / **identify** / **quit** | Same as `a` / `r` / `i` / `q` |
+| Click **keep** / **revert** in the dialog | Keep or revert |

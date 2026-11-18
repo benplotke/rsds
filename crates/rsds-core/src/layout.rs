@@ -222,11 +222,12 @@ pub fn compact(fixed: Option<Rect>, centre: (i32, i32), rects: &[Rect]) -> Vec<R
     out
 }
 
-/// Position for a new rect to the right of all of `existing`,
-/// top-aligned with the rightmost one.
-pub fn place_right(existing: &[Rect]) -> (i32, i32) {
+/// Position for a new rect of height `h` to the right of all of
+/// `existing`, vertically centred on the rightmost one (the topmost, if
+/// several share the right edge).
+pub fn place_right(existing: &[Rect], h: i32) -> (i32, i32) {
     match existing.iter().max_by_key(|r| (r.right(), -r.y)) {
-        Some(r) => (r.right(), r.y),
+        Some(r) => (r.right(), r.y + (r.h - h) / 2),
         None => (0, 0),
     }
 }
@@ -299,8 +300,11 @@ mod tests {
 
     #[test]
     fn place_right_of_rightmost() {
-        assert_eq!(place_right(&[r(0, 0, FHD), r(1920, 200, FHD)]), (3840, 200));
-        assert_eq!(place_right(&[]), (0, 0));
+        assert_eq!(place_right(&[r(0, 0, FHD), r(1920, 200, FHD)], 1080), (3840, 200));
+        // Centred on its left neighbour, not top-aligned.
+        assert_eq!(place_right(&[r(0, 0, (1920, 2160)), r(1920, 540, FHD)], 2160), (3840, 0));
+        assert_eq!(place_right(&[r(0, 0, (1920, 2160))], 1080), (1920, 540));
+        assert_eq!(place_right(&[], 1080), (0, 0));
     }
 
     #[test]

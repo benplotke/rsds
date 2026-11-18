@@ -47,12 +47,7 @@ fn event_loop<B: Backend>(terminal: &mut DefaultTerminal, backend: &mut B) -> io
     app.load_settings();
     // Learn whether the lid has taken the panel out of use.
     app.outputs_changed(backend.outputs(), lid_closed(&app));
-    // Which monitor duplicates which, where they are the same size.
-    if let Ok(profiles) = Profiles::load()
-        && let Some(p) = profiles.find(&active_outputs(backend.outputs(), lid_closed(&app)))
-    {
-        app.use_profile(p);
-    }
+    load_profile(&mut app, backend);
     let stdin = io::stdin();
     // Start crossterm's event source now so it installs its SIGWINCH
     // handler; the signal interrupts poll() below and we pick up resizes.
@@ -78,7 +73,12 @@ fn event_loop<B: Backend>(terminal: &mut DefaultTerminal, backend: &mut B) -> io
         }
 
         if backend.dispatch().map_err(io::Error::other)? {
-            if let Some(r) = app.outputs_changed(backend.outputs(), lid_closed(&app)) {
+            let set = app.monitor_set().to_vec();
+            let request = app.outputs_changed(backend.outputs(), lid_closed(&app));
+            if app.monitor_set() != set {
+                load_profile(&mut app, backend);
+            }
+            if let Some(r) = request {
                 perform(&mut app, backend, r);
             }
         }
@@ -89,7 +89,11 @@ fn event_loop<B: Backend>(terminal: &mut DefaultTerminal, backend: &mut B) -> io
                     Err(Flow::Quit) => return quit(&mut app, backend),
                     Err(Flow::Continue) => None,
                 },
-                Event::Mouse(mouse) => handle_mouse(&mut app, mouse),
+                Event::Mouse(mouse) => match handle_mouse(&mut app, mouse) {
+                    Ok(r) => r,
+                    Err(Flow::Quit) => return quit(&mut app, backend),
+                    Err(Flow::Continue) => None,
+                },
                 _ => None,
             };
             if let Some(r) = request {
@@ -99,6 +103,17 @@ fn event_loop<B: Backend>(terminal: &mut DefaultTerminal, backend: &mut B) -> io
         if let Some(r) = app.tick(Instant::now()) {
             perform(&mut app, backend, r);
         }
+    }
+}
+
+/// Take what the saved profile for the monitors in use knows: which
+/// monitor duplicates which, where they are the same size, and where
+/// monitors that are off or duplicating go back to.
+fn load_profile<B: Backend>(app: &mut App, backend: &B) {
+    if let Ok(profiles) = Profiles::load()
+        && let Some(p) = profiles.find(&active_outputs(backend.outputs(), lid_closed(app)))
+    {
+        app.use_profile(p);
     }
 }
 
@@ -135,8 +150,9 @@ fn perform<B: Backend>(app: &mut App, backend: &mut B, request: Request) {
             // With the lid closed, this is the profile for the externals.
             let outputs = active_outputs(backend.outputs(), lid_closed(app));
             let hint = app.duplicate_hint(&outputs);
+            let restores = app.restores_for(&outputs);
             let saved = Profiles::load().and_then(|mut p| {
-                p.remember(&outputs, &hint);
+                p.remember(&outputs, &hint, restores);
                 p.save()
             });
             if let Err(e) = saved {
@@ -158,7 +174,7 @@ fn perform<B: Backend>(app: &mut App, backend: &mut B, request: Request) {
         Ok(()) => {
             // Pending now matches what was applied; adopt the live state so
             // compositor adjustments (e.g. rounding) don't show as edits.
-            app.reset();
+            app.adopt_live();
             if !is_revert {
                 app.applied(previous);
             }
@@ -226,7 +242,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<Option<Request>, Flow> {
             KeyCode::Enter | KeyCode::Char('k') | KeyCode::Char('y') => {
                 Some(app.keep())
             }
-            KeyCode::Esc | KeyCode::Char('n') => app.revert(),
+            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('r') => app.revert(),
             KeyCode::Char('q') => return Err(Flow::Quit),
             _ => None,
         });
@@ -240,7 +256,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<Option<Request>, Flow> {
     }
     match key.code {
         KeyCode::Char('q') => return Err(Flow::Quit),
-        KeyCode::Char('a') => return Ok(app.apply()),
+        KeyCode::Char('a') | KeyCode::Enter => return Ok(app.apply()),
         KeyCode::Char('r') => app.reset(),
         KeyCode::Char('i') => return Ok(Some(app.identify())),
         KeyCode::Tab => app.cycle_focus(1),
@@ -248,7 +264,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<Option<Request>, Flow> {
         KeyCode::Up | KeyCode::Char('k') => app.move_in_focus(-1),
         KeyCode::Down | KeyCode::Char('j') => app.move_in_focus(1),
         KeyCode::Left | KeyCode::Char('h') => app.move_focus(-1),
-        KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => app.move_focus(1),
+        KeyCode::Right | KeyCode::Char('l') => app.move_focus(1),
         _ => {}
     }
     Ok(None)
@@ -266,7 +282,16 @@ fn hit(r: &Rect, col: u16, row: u16) -> bool {
     r.contains(Position::new(col, row))
 }
 
-fn handle_mouse(app: &mut App, m: MouseEvent) -> Option<Request> {
+fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<Option<Request>, Flow> {
+    let quit = app.confirm.is_none() && app.hits.quit.is_some_and(|r| hit(&r, m.column, m.row));
+    if quit && m.kind == MouseEventKind::Down(MouseButton::Left) {
+        return Err(Flow::Quit);
+    }
+    Ok(mouse_request(app, m))
+}
+
+/// What a mouse event other than clicking quit does.
+fn mouse_request(app: &mut App, m: MouseEvent) -> Option<Request> {
     let (col, row) = (m.column, m.row);
     if app.confirm.is_some() {
         if m.kind == MouseEventKind::Down(MouseButton::Left) {
@@ -341,7 +366,7 @@ mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
     use rsds_core::{Mode, Output, Transform};
-    use crate::app::Setting;
+    use crate::app::{Section, Setting};
 
     fn output(name: &str, make: &str, modes: &[(i32, i32, i32)], cur: usize, pos: (i32, i32)) -> Output {
         Output {
@@ -520,6 +545,183 @@ mod tests {
         set(&mut app, 2, Setting::Duplicate, 1);
         set(&mut app, 0, Setting::Enabled, 1);
         assert_eq!(app.entries[2].duplicates, None);
+        let rects: Vec<_> = app.entries.iter().filter_map(|e| e.rect()).collect();
+        assert!(rsds_core::layout::is_valid(&rects), "{rects:?}");
+    }
+
+    fn positions(app: &App) -> Vec<(i32, i32)> {
+        app.entries.iter().map(|e| e.pending.position).collect()
+    }
+
+    #[test]
+    fn turned_back_on_returns_to_its_place() {
+        let mut app = App::new(&sample(), None);
+        let original = positions(&app);
+        app.select(1); // DP-3, in the middle
+        app.toggle_enabled();
+        app.toggle_enabled();
+        assert_eq!(positions(&app), original);
+        assert!(!app.is_dirty());
+    }
+
+    #[test]
+    fn unduplicated_returns_to_its_place() {
+        let mut app = App::new(&sample(), None);
+        let original = positions(&app);
+        // DP-3 (1) duplicates eDP-1 (1), then doesn't.
+        set(&mut app, 1, Setting::Duplicate, 1);
+        assert_eq!(app.entries[1].duplicates.as_deref(), Some("eDP-1"));
+        set(&mut app, 1, Setting::Duplicate, 0);
+        assert_eq!(app.entries[1].duplicates, None);
+        assert_eq!(positions(&app), original);
+        assert!(!app.is_dirty());
+    }
+
+    #[test]
+    fn duplicate_turned_off_and_on_returns_to_its_place() {
+        let mut app = App::new(&sample(), None);
+        let original = positions(&app);
+        set(&mut app, 1, Setting::Duplicate, 1);
+        app.toggle_enabled();
+        app.toggle_enabled();
+        assert_eq!(positions(&app), original);
+        assert!(!app.is_dirty());
+    }
+
+    #[test]
+    fn place_is_forgotten_when_others_change() {
+        let mut app = App::new(&sample(), None);
+        app.select(1);
+        app.toggle_enabled();
+        // DP-5 becomes 3840x2160, so DP-3's old place is gone.
+        set(&mut app, 2, Setting::Resolution, 1);
+        app.select(1);
+        app.toggle_enabled();
+        // Right of DP-5, centred on it.
+        assert_eq!(app.entries[2].pending.position, (1920, 0));
+        assert_eq!(app.entries[1].pending.position, (5760, 540));
+    }
+
+    /// Apply the pending configuration, as the display server would, and
+    /// keep it.
+    fn apply_and_keep(app: &mut App) {
+        app.apply().unwrap();
+        let live = applied(app);
+        app.sync(&live);
+        app.adopt_live();
+        app.keep();
+    }
+
+    #[test]
+    fn kept_off_still_returns_to_its_place() {
+        let mut app = App::new(&sample(), None);
+        let original = positions(&app);
+        app.select(1);
+        app.toggle_enabled();
+        apply_and_keep(&mut app);
+        assert!(!app.entries[1].live.enabled);
+        app.toggle_enabled();
+        assert_eq!(positions(&app), original);
+        // Discarding that brings the place back for next time.
+        app.reset();
+        app.toggle_enabled();
+        assert_eq!(positions(&app), original);
+    }
+
+    #[test]
+    fn kept_duplicate_still_returns_to_its_place() {
+        let mut app = App::new(&sample(), None);
+        let original = positions(&app);
+        set(&mut app, 1, Setting::Duplicate, 1);
+        apply_and_keep(&mut app);
+        set(&mut app, 1, Setting::Duplicate, 0);
+        assert_eq!(app.entries[1].duplicates, None);
+        assert_eq!(positions(&app), original);
+    }
+
+    #[test]
+    fn kept_place_is_forgotten_when_others_change() {
+        let mut app = App::new(&sample(), None);
+        app.select(1);
+        app.toggle_enabled();
+        apply_and_keep(&mut app);
+        set(&mut app, 2, Setting::Resolution, 1);
+        apply_and_keep(&mut app);
+        app.select(1);
+        app.toggle_enabled();
+        assert_eq!(app.entries[1].pending.position, (5760, 540));
+    }
+
+    #[test]
+    fn place_comes_back_with_the_monitors() {
+        let mut app = App::new(&sample(), None);
+        let original = positions(&app);
+        app.select(1);
+        app.toggle_enabled();
+        apply_and_keep(&mut app);
+        let live = applied(&app);
+        let mut profiles = Profiles::default();
+        profiles.remember(&live, &app.duplicate_hint(&live), app.restores_for(&live));
+
+        // DP-5 unplugged and plugged back in.
+        let unplugged: Vec<_> = live.iter().filter(|o| o.name != "DP-5").cloned().collect();
+        app.outputs_changed(&unplugged, false);
+        app.outputs_changed(&live, false);
+        app.use_profile(profiles.find(&live).unwrap());
+        app.select(1);
+        app.toggle_enabled();
+        assert_eq!(positions(&app), original);
+    }
+
+    #[test]
+    fn lid_close_info_follows_choice() {
+        let mut app = App::new(&sample(), None);
+        app.set_section(Section::LidClose);
+        app.focus = Focus::Options;
+        app.lid_close.lid_close = rsds_core::lid_close::LidClose::Never;
+        let screen = render(&mut app);
+        println!("{screen}");
+        assert!(screen.contains("never suspends"), "{screen}");
+        assert!(!screen.contains("left to the system"), "{screen}");
+    }
+
+    /// Entry `index`'s box in the arrangement.
+    fn box_of(app: &mut App, index: usize) -> ratatui::layout::Rect {
+        render(app);
+        app.hits.monitors.iter().find(|(i, _)| *i == index).unwrap().1
+    }
+
+    /// Drag entry `index` by its middle to cell `to`.
+    fn drag(app: &mut App, index: usize, to: (u16, u16)) {
+        let r = box_of(app, index);
+        app.begin_drag(index, (r.x + r.width / 2, r.y + r.height / 2));
+        app.drag_to(to);
+        app.end_drag();
+    }
+
+    #[test]
+    fn dropping_on_a_monitor_duplicates_it() {
+        let mut app = App::new(&sample(), None);
+        let original = positions(&app);
+        // DP-3 (1) dropped on eDP-1 (0).
+        let r = box_of(&mut app, 0);
+        drag(&mut app, 1, (r.x + r.width / 2, r.y + r.height / 2));
+        assert_eq!(app.entries[1].duplicates.as_deref(), Some("eDP-1"));
+        assert_eq!(app.entries[1].pending.position, (0, 0));
+        // DP-5 closes the gap.
+        assert_eq!(app.entries[2].pending.position, (1920, 0));
+        // Stopping duplicating puts it back where it was.
+        set(&mut app, 1, Setting::Duplicate, 0);
+        assert_eq!(positions(&app), original);
+    }
+
+    #[test]
+    fn dropping_on_an_edge_snaps_alongside() {
+        let mut app = App::new(&sample(), None);
+        // DP-3 (1) dropped over eDP-1's (0) left edge.
+        let r = box_of(&mut app, 0);
+        drag(&mut app, 1, (r.x, r.y + r.height / 2));
+        assert_eq!(app.entries[1].duplicates, None);
         let rects: Vec<_> = app.entries.iter().filter_map(|e| e.rect()).collect();
         assert!(rsds_core::layout::is_valid(&rects), "{rects:?}");
     }

@@ -239,7 +239,8 @@ fn turn_on(configs: &mut [OutputConfig], outputs: &[Output], i: usize, unplaced:
     if c.scale <= 0.0 {
         c.scale = 1.0;
     }
-    c.position = layout::place_right(&others);
+    let h = c.rect().map_or(0, |r| r.h);
+    c.position = layout::place_right(&others, h);
 }
 
 #[cfg(test)]
@@ -337,7 +338,7 @@ mod tests {
     fn saved_profile_wins() {
         let saved = [output("eDP-1", "L", Some((1920, 0))), output("DP-1", "A", Some((0, 0)))];
         let mut profiles = Profiles::default();
-        profiles.remember(&saved, &[]);
+        profiles.remember(&saved, &[], Vec::new());
         let now = [output("eDP-1", "L", Some((0, 0))), output("DP-1", "A", Some((1920, 0)))];
         let plan = plan(&now, None, &profiles).unwrap();
         assert_eq!(plan[0].position, (1920, 0));
@@ -397,7 +398,7 @@ mod tests {
     #[test]
     fn lid_close_uses_externals_profile() {
         let mut profiles = Profiles::default();
-        profiles.remember(&[output("DP-1", "A", Some((1920, 0))), output("DP-2", "B", Some((0, 0)))], &[]);
+        profiles.remember(&[output("DP-1", "A", Some((1920, 0))), output("DP-2", "B", Some((0, 0)))], &[], Vec::new());
         let outputs = [
             output("eDP-1", "L", Some((0, 1080))),
             output("DP-1", "A", Some((0, 0))),
