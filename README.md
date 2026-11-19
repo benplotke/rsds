@@ -1,7 +1,11 @@
 # (rsds) Reasonably Sane Display Settings README
 
+## How to Run
+Because this is still in development, for now, you can start the daemon with
+`cargo run --release -p rsds-w daemon` and start the UI with `cargo run --release -p rsds-w`.
+
 ## Goal
-This project aims to provide a high quality standalone manager for configuration of monitors. This includes sane defaults for newly plugged in monitors, automatic restoration of configuration when plugging into previously seen monitors, and an intuitive UI for configuring monitors. The feature set and experience are inspired by Windows 11's Display Settings. The UI is inspired by btop.
+This project aims to provide a high quality standalone manager for configuration of monitors. This includes sane defaults for newly plugged in monitors, automatic restoration of configuration when plugging into previously seen monitors, and an intuitive UI for configuring monitors. The feature set and experience are inspired by Windows 11's Display Settings, though it improves on it in many ways. The UI is inspired by btop.
 
 ## Philosophy
 Computers should do what we want, and no more. Programs should do what they do with as little resources as possible. What a program does should be done well.
@@ -10,7 +14,7 @@ Computers should do what we want, and no more. Programs should do what they do w
 - lxrandr – does not support advanced features like arbitrary screen positioning
 - xlayoutdisplay - does not support advanced features like arbitrary screen positioning
 - arandr + autorandr – despite the name, you have to run CLI commands to save a configuration
-- wdisplays + kanshi – This is very close to what I want. I don't think it support wl-roots out of the box though.
+- wdisplays + kanshi – This is very close to what I want. I think mine is nicer though
 - way-displays – does not support advanced features like arbitrary screen positioning
 
 ## Design Choices
@@ -22,13 +26,15 @@ Computers should do what we want, and no more. Programs should do what they do w
 ## UI Features
 - Graphical view of the monitors which can be dragged with the mouse to rearrange
 - Graphical view has automatic snapping
+- Monitors can be dragged on top of each other to duplicate
 - All available monitors are visible in the UI, but disabled ones are grayed out
 - Brightness slider for the built-in display, on laptops only
 - Nightlight toggle with optional schedule
 - Identify button which causes each screen to flash its number
 - List of monitors with the settings for each
-- Settings for each monitor are: on or off, primary, resolution, refresh rate, orientation, scale, and duplicate (to duplicate another monitor).
+- Settings for each monitor are: on or off, primary, resolution, refresh rate, orientation, scale, and duplicate (to duplicate other monitors).
 - New layout reverts after 15 seconds if you don't select accept on the countdown
+- If you duplicate another display or turn off a display, then revert that change. The screen jumps back to its previous position if the layout has otherwise not changed.
 - Lid close options to either suspend, suspend if not docked, never suspend, or use the system defaults
 
 ## Daemon Features

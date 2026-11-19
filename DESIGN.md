@@ -36,7 +36,12 @@ Decisions made during development that aren't in the README.
   - The daemon holds a flock on `$XDG_RUNTIME_DIR/rsds-daemon.lock`; a second daemon
     refuses to start, and the UI uses it to warn when the daemon isn't running.
 - UI sections: a left-most pane switches between Displays (sections · displays · settings
-  · options), Nightlight (sections · settings · options) and Lid Close (sections · lid close).
+  · options), Nightlight (sections · settings · options) and Lid Close (sections · lid close
+  · info, which explains only the chosen option).
+- Footer: buttons apply · reset · identify · quit, whose highlighted first letter is the
+  key; there are no separate key hints (arrow keys are left to be guessed). Enter applies.
+  The confirmation dialog's buttons are keep · revert the same way (Enter/y and Esc/n
+  also work, unadvertised).
 - Identify: drawn by the UI process. Wayland: layer-shell + wl_shm buffer, digits drawn
   as simple blocky shapes (no font library). X11: one override-redirect window per monitor.
 - Brightness: logind `SetBrightness` over D-Bus (no root, no udev rules), via the `dbus`
@@ -94,25 +99,54 @@ Decisions made during development that aren't in the README.
   own resolution and gets the largest scale (in the protocol's 1/256 steps) at which it
   covers the source; with a different aspect ratio it shows a strip beyond the source along
   one edge. Scales below 1 are fine on labwc (tested 0.5).
-  - Duplicates take no part in the arrangement: they are drawn in their source's box
-    ("1 | 3"), dragging either moves the source, and the duplicate's scale is greyed out.
-    When the source changes size, the duplicate's scale follows.
-  - Choices: Off, or any other monitor that is on and not a duplicate itself. A monitor
-    that others duplicate can become a duplicate; they then duplicate its new source.
-  - Stopping duplicating (Off, or the source turned off) gives the monitor the nearest
-    regular scale and puts it right of the others.
+  - Considered and dropped: centring a group's monitors with equal areas, so the shared
+    area is their intersection with a border on each. The border isn't black: the
+    compositor treats it as desktop, so the mouse and windows can go into it, and the
+    output protocol can't crop an output. So the duplicates cover the source instead.
+  - Groups are symmetric to the user: a source and its duplicates form a group, and every
+    member's Duplicate setting shows the group ("1 | 3"). Internally one member (the one
+    the others joined) is the source: its scale is the one that can be set, and the
+    others' scales are greyed out and follow it.
+  - The group takes part in the arrangement as one box, the source's; dragging any of it
+    moves the group.
+  - Choices for a monitor not in a group: Off, each other monitor that is on and alone,
+    and each group as one option (choosing it joins the group). For a monitor in a group:
+    Off and its group; to move to another group, leave first.
+  - Off (or turning the monitor off) takes just that monitor out. If it was the source,
+    the group stays where it is and the next member becomes the source, with the nearest
+    regular scale; a group left with one monitor is no more. The monitor that left goes
+    back to its remembered place (below) if it has one, else right of the others.
+  - Dropping a monitor on its own onto another monitor's box duplicates it (joins its
+    group): its centre must land in the middle half, across and down, of that monitor.
+    A group can't be dropped onto another; it is placed like any drag.
   - The compositor doesn't report mirroring, so it is read from the layout: outputs at the
     same position where one covers the others (within 3 px of rounding). When they are the
     same size, which is the source comes from the UI's own edits, else the saved profile
     (`duplicates`: the source's identity), else the first.
   - The daemon keeps duplicates on their sources when it closes gaps.
+- Remembered places: when a monitor leaves the arrangement (turned off, or made a
+  duplicate), the layout from just before is remembered. When it comes back (turned on,
+  or Duplicate Off), it and the others go back to their places, if the other monitors are
+  still where they were right after it left (same position, size and duplicating);
+  otherwise it goes to the right of the others, vertically centred on the rightmost.
+  Only position, scale and who duplicates whom are restored; other settings stay as they
+  are now.
+  - Places are kept through Apply and saved with the profile on Keep (`restores`: by
+    monitor identity, the layout before and the other monitors' layout after), so they
+    survive unplugging, replugging and restarting the UI. A place that no longer holds at
+    Apply is dropped; on Keep the "after" layout is re-read from the live state to absorb
+    the compositor's rounding.
+  - Reset and Revert bring back the places of the kept configuration; a change of
+    monitor set loads the new set's places from its profile.
+  - With the lid closed, places are saved for the externals only.
 - Monitor identity in profiles: EDID make|model|serial; falls back to connector name when
   there is no serial.
 
 ## Daemon (`rsds-w daemon`)
 - Reacts only when the *set* of connected monitors changes (by identity), and once at startup.
   Ordinary configuration changes (from the UI, wlr-randr, …) are ignored.
-- A profile is saved only when the user presses Keep in the UI. The daemon never saves.
+- A profile is saved only when the user presses Keep in the UI. The daemon never saves
+  profiles (it only writes Nightlight's `enabled` when the schedule switches it).
 - Saved profile for the current set → apply it (also at startup).
 - No profile:
   - new monitors are turned on at their preferred mode and placed right of the rightmost
@@ -122,7 +156,8 @@ Decisions made during development that aren't in the README.
   - at startup, nothing is changed.
 
 ## Crates
-- `rsds-core`: model, layout geometry (snapping, compaction), profiles, Identify badge, `Backend` trait.
+- `rsds-core`: model, layout geometry (snapping, compaction, placing to the right),
+  profiles, Identify badge, `Backend` trait.
 - `rsds-wayland`: wlroots backend.
 - `rsds-tui`: ratatui UI, generic over `Backend`.
 - `rsds-daemon`: hotplug/profile service, generic over `Backend`.
