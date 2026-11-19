@@ -48,6 +48,7 @@ fn event_loop<B: Backend>(terminal: &mut DefaultTerminal, backend: &mut B) -> io
     // Learn whether the lid has taken the panel out of use.
     app.outputs_changed(backend.outputs(), lid_closed(&app));
     load_profile(&mut app, backend);
+    let settings = watch_settings();
     let stdin = io::stdin();
     // Start crossterm's event source now so it installs its SIGWINCH
     // handler; the signal interrupts poll() below and we pick up resizes.
@@ -61,15 +62,24 @@ fn event_loop<B: Backend>(terminal: &mut DefaultTerminal, backend: &mut B) -> io
             let t = d.saturating_duration_since(Instant::now()).min(Duration::from_secs(1));
             Timespec { tv_sec: t.as_secs() as _, tv_nsec: t.subsec_nanos() as _ }
         });
-        {
-            let mut fds = [
+        let settings_changed = {
+            let mut fds = vec![
                 PollFd::new(&stdin, PollFlags::IN),
                 PollFd::from_borrowed_fd(backend.fd(), PollFlags::IN),
             ];
+            if let Some(fd) = &settings {
+                fds.push(PollFd::new(fd, PollFlags::IN));
+            }
             match rustix::event::poll(&mut fds, timeout.as_ref()) {
                 Ok(_) | Err(rustix::io::Errno::INTR) => {}
                 Err(e) => return Err(e.into()),
             }
+            fds.get(2).is_some_and(|f| !f.revents().is_empty())
+        };
+        if let (true, Some(fd)) = (settings_changed, &settings) {
+            let mut buf = [0u8; 4096];
+            while rustix::io::read(fd, &mut buf).is_ok_and(|n| n > 0) {}
+            app.reload_nightlight();
         }
 
         if backend.dispatch().map_err(io::Error::other)? {
@@ -104,6 +114,17 @@ fn event_loop<B: Backend>(terminal: &mut DefaultTerminal, backend: &mut B) -> io
             perform(&mut app, backend, r);
         }
     }
+}
+
+/// Watch the settings directory, to show Nightlight as the daemon's
+/// schedule switches it. None if it can't be watched.
+fn watch_settings() -> Option<rustix::fd::OwnedFd> {
+    use rustix::fs::inotify;
+    let dir = rsds_core::profile::config_dir()?;
+    std::fs::create_dir_all(&dir).ok()?;
+    let fd = inotify::init(inotify::CreateFlags::CLOEXEC | inotify::CreateFlags::NONBLOCK).ok()?;
+    inotify::add_watch(&fd, &dir, inotify::WatchFlags::MOVED_TO | inotify::WatchFlags::CLOSE_WRITE).ok()?;
+    Some(fd)
 }
 
 /// Take what the saved profile for the monitors in use knows: which

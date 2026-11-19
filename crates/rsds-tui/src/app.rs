@@ -856,6 +856,14 @@ impl App {
         self.daemon_running = rsds_core::daemon_lock::is_running();
     }
 
+    /// The Nightlight settings file changed (e.g. the daemon's schedule
+    /// switched it on or off): show it as it is now.
+    pub fn reload_nightlight(&mut self) {
+        if let Ok(n) = Nightlight::load() {
+            self.nightlight = n;
+        }
+    }
+
     fn save_lid_close(&mut self) {
         if let Err(e) = self.lid_close.save() {
             self.status = Some(format!("Couldn't save Lid Close settings: {e}"));

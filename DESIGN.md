@@ -23,8 +23,12 @@ Decisions made during development that aren't in the README.
   - Settings in `~/.config/rsds/nightlight.json` (`enabled`, `temperature` in K, `schedule`,
     `start`/`end` as "HH:MM"). The UI writes it on every change; the daemon watches the
     directory with inotify and applies changes immediately.
-  - `enabled` is the master switch; with `schedule` on, the tint is only active between
-    `start` and `end` (may wrap past midnight; equal times = all day).
+  - `enabled` is whether the tint is on now, and the UI's On/Off shows and sets it. With
+    `schedule` on, the daemon switches it on at `start` and off at `end` (equal times: no
+    schedule), saving that to the file so the UI (which watches the file) shows it; in
+    between, On/Off can be switched either way. A scheduled time that passed while the
+    daemon wasn't running or the computer slept takes effect when it next looks, unless
+    the file was written after it (the file's mtime is when the daemon starts from).
   - The daemon arms a CLOCK_REALTIME timerfd for the next start/end, so changes happen on
     time after suspend and clock changes (CANCEL_ON_SET). Local time via libc (DST-aware).
   - Wayland: wlr-gamma-control on every output, re-applied to outputs connected later.

@@ -16,11 +16,12 @@ pub const MAX_K: u32 = 6500;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Nightlight {
-    /// Master switch.
+    /// Whether the tint is on now. The schedule turns it on at `start`
+    /// and off at `end`; in between, it can be switched either way.
     pub enabled: bool,
     /// Colour temperature while active, in kelvin.
     pub temperature: u32,
-    /// When true, only active between `start` and `end`.
+    /// Turn on at `start` and off at `end` each day.
     pub schedule: bool,
     pub start: TimeOfDay,
     pub end: TimeOfDay,
@@ -39,11 +40,6 @@ impl Default for Nightlight {
 }
 
 impl Nightlight {
-    /// Whether the tint should be applied at local time `now`.
-    pub fn active_at(&self, now: TimeOfDay) -> bool {
-        self.enabled && (!self.schedule || now.within(self.start, self.end))
-    }
-
     pub fn path() -> Option<PathBuf> {
         crate::profile::config_dir().map(|d| d.join("nightlight.json"))
     }
@@ -80,15 +76,6 @@ impl TimeOfDay {
         self.0 % 60
     }
 
-    /// In the window [start, end), which may wrap past midnight. A window
-    /// with start == end covers the whole day.
-    pub fn within(self, start: TimeOfDay, end: TimeOfDay) -> bool {
-        match start.cmp(&end) {
-            std::cmp::Ordering::Less => start <= self && self < end,
-            std::cmp::Ordering::Greater => self >= start || self < end,
-            std::cmp::Ordering::Equal => true,
-        }
-    }
 }
 
 impl std::fmt::Display for TimeOfDay {
@@ -184,27 +171,6 @@ mod tests {
         let ramp = gamma_ramp(256, NEUTRAL_K);
         assert_eq!(ramp.len(), 768);
         assert_eq!((ramp[0], ramp[255], ramp[511], ramp[767]), (0, 65535, 65535, 65535));
-    }
-
-    #[test]
-    fn window_wraps_midnight() {
-        let (start, end) = (t("21:00"), t("07:00"));
-        assert!(t("23:30").within(start, end));
-        assert!(t("06:59").within(start, end));
-        assert!(!t("07:00").within(start, end));
-        assert!(!t("12:00").within(start, end));
-        assert!(t("10:00").within(t("09:00"), t("17:00")));
-    }
-
-    #[test]
-    fn schedule_gates_enabled() {
-        let mut n = Nightlight { enabled: true, schedule: true, ..Default::default() };
-        assert!(n.active_at(t("22:00")));
-        assert!(!n.active_at(t("12:00")));
-        n.schedule = false;
-        assert!(n.active_at(t("12:00")));
-        n.enabled = false;
-        assert!(!n.active_at(t("22:00")));
     }
 
     #[test]
