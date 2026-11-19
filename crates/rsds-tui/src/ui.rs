@@ -635,7 +635,7 @@ fn setting_text(app: &App, s: Setting) -> (&'static str, String, bool) {
         Setting::Orientation => on.then_some(Choice::Orientation(e.pending.transform)),
         Setting::Scale => on.then_some(Choice::Scale(e.pending.scale)),
         Setting::Duplicate => {
-            let source = app.source_of(app.selected).map(|s| app.entries[s].number);
+            let source = app.group_of(app.selected).map(|s| app.entries[s].number);
             let value = if on {
                 app.choice_label(&Choice::Duplicate(source), e, false)
             } else {

@@ -725,4 +725,111 @@ mod tests {
         let rects: Vec<_> = app.entries.iter().filter_map(|e| e.rect()).collect();
         assert!(rsds_core::layout::is_valid(&rects), "{rects:?}");
     }
+
+    /// Labels of the Duplicate options for entry `index`, and the current one.
+    fn duplicate_options(app: &mut App, index: usize) -> (Vec<String>, Option<usize>) {
+        app.select(index);
+        app.setting = Setting::Duplicate;
+        let (choices, current) = app.choices();
+        let e = &app.entries[index];
+        (choices.iter().map(|c| app.choice_label(c, e, true)).collect(), current)
+    }
+
+    fn sources(app: &App) -> Vec<Option<&str>> {
+        app.entries.iter().map(|e| e.duplicates.as_deref()).collect()
+    }
+
+    #[test]
+    fn both_sides_of_a_duplicate_show_the_group() {
+        let mut app = App::new(&sample(), None);
+        // DP-3 (2) duplicates eDP-1 (1).
+        set(&mut app, 1, Setting::Duplicate, 1);
+        for i in [0, 1] {
+            assert_eq!(duplicate_options(&mut app, i), (vec!["Off".into(), "1 | 2".into()], Some(1)));
+        }
+        // DP-5 (3), on its own, sees the group as one option.
+        assert_eq!(duplicate_options(&mut app, 2), (vec!["Off".into(), "1 | 2".into()], Some(0)));
+        let screen = render(&mut app);
+        assert!(screen.contains("1 | 2"), "{screen}");
+    }
+
+    #[test]
+    fn leaving_from_the_duplicated_side() {
+        let mut app = App::new(&sample(), None);
+        set(&mut app, 1, Setting::Duplicate, 1);
+        // eDP-1, the one duplicated, turns Duplicate off.
+        set(&mut app, 0, Setting::Duplicate, 0);
+        assert_eq!(sources(&app), vec![None, None, None]);
+        // DP-3 stays where the pair was; eDP-1 goes to the right.
+        assert_eq!(app.entries[1].pending.position, (0, 0));
+        assert_eq!(app.entries[2].pending.position, (1920, 0));
+        assert_eq!(app.entries[0].pending.position, (3840, 540));
+    }
+
+    #[test]
+    fn group_of_three_carries_on_without_one() {
+        let mut app = App::new(&sample(), None);
+        set(&mut app, 1, Setting::Duplicate, 1);
+        set(&mut app, 2, Setting::Duplicate, 1); // joins "1 | 2"
+        assert_eq!(sources(&app), vec![None, Some("eDP-1"), Some("eDP-1")]);
+        assert_eq!(duplicate_options(&mut app, 2).0, vec!["Off".to_string(), "1 | 2 | 3".into()]);
+        set(&mut app, 0, Setting::Duplicate, 0);
+        assert_eq!(sources(&app), vec![None, None, Some("DP-3")]);
+        let rects: Vec<_> = app.entries.iter().filter_map(|e| e.rect()).collect();
+        assert!(rsds_core::layout::is_valid(&[rects[0], rects[1]]), "{rects:?}");
+    }
+
+    #[test]
+    fn turning_off_one_of_a_group_and_back_on() {
+        let mut app = App::new(&sample(), None);
+        set(&mut app, 1, Setting::Duplicate, 1);
+        set(&mut app, 2, Setting::Duplicate, 1);
+        let grouped = positions(&app);
+        app.select(0);
+        app.toggle_enabled();
+        assert_eq!(sources(&app), vec![None, None, Some("DP-3")]);
+        app.toggle_enabled();
+        assert_eq!(sources(&app), vec![None, Some("eDP-1"), Some("eDP-1")]);
+        assert_eq!(positions(&app), grouped);
+    }
+
+    /// Rows between the tops of entries `a` and `b` as the map draws them.
+    fn drawn_rows(app: &App, a: usize, b: usize) -> i32 {
+        let row = |i: usize| app.hits.monitors.iter().find(|(j, _)| *j == i).unwrap().1.y as i32;
+        row(a) - row(b)
+    }
+
+    #[test]
+    fn dropped_beside_stays_as_drawn() {
+        // 3 (DP-5) with 2 (DP-3) to its right, and 1 (eDP-1) below.
+        let outs = vec![
+            output("DP-5", "AOC", &[(2560, 1440, 59951)], 0, (0, 0)),
+            output("DP-3", "ASUS", &[(1920, 1080, 60000)], 0, (2560, 202)),
+            output("eDP-1", "Chimei", &[(1920, 1080, 60008)], 0, (161, 1440)),
+        ];
+        for (w, h) in [(100, 30), (160, 45), (200, 50), (240, 60)] {
+            // 1 dragged up to the left of 3, to where it is drawn flush with
+            // 3's top, and one row above and below that.
+            for offset in [-1, 0, 1] {
+                let mut app = App::new(&outs, None);
+                let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+                t.draw(|f| ui::draw(f, &mut app)).unwrap();
+                let one = app.hits.monitors.iter().find(|(i, _)| *i == 0).unwrap().1;
+                let three = app.hits.monitors.iter().find(|(i, _)| *i == 2).unwrap().1;
+                let grab = (one.x + one.width / 2, one.y);
+                app.begin_drag(0, grab);
+                let to = (three.x - one.width / 2 - 1, (three.y as i32 + offset) as u16);
+                app.drag_to(to);
+                t.draw(|f| ui::draw(f, &mut app)).unwrap();
+                let during = drawn_rows(&app, 0, 2);
+                app.end_drag();
+                t.draw(|f| ui::draw(f, &mut app)).unwrap();
+                let (one, three) = (app.entries[0].pending.position, app.entries[2].pending.position);
+                assert_eq!(one.0 - three.0, -1920, "{w}x{h} {offset}");
+                assert_eq!(drawn_rows(&app, 0, 2), during, "{w}x{h} {offset}");
+                // Drawn flush is flush.
+                assert_eq!(during == 0, one.1 == three.1, "{w}x{h} {offset}: {one:?} {three:?}");
+            }
+        }
+    }
 }

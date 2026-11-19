@@ -114,16 +114,16 @@ pub fn follow_resize(old: Rect, new: Rect, others: &mut [Rect]) {
 ///
 /// The result shares an edge segment (not just a corner) with at least one
 /// of `others`, does not overlap any of them, and is the closest such
-/// position to where it was dropped. Edges within `threshold` (x, y) of
-/// another output's parallel edge are aligned with it.
-pub fn snap(moving: Rect, others: &[Rect], threshold: (i32, i32)) -> Rect {
-    snap_inner(moving, others, threshold, false)
+/// position to where it was dropped. It only moves as far as that needs:
+/// edges are not lined up with other outputs' edges.
+pub fn snap(moving: Rect, others: &[Rect]) -> Rect {
+    snap_inner(moving, others, false)
 }
 
 /// Like [`snap`], but when `full_edge` is set, a rect that has to slide along
 /// a neighbour's edge goes far enough to share the whole of the shorter
 /// edge, rather than stopping at a sliver.
-fn snap_inner(moving: Rect, others: &[Rect], threshold: (i32, i32), full_edge: bool) -> Rect {
+fn snap_inner(moving: Rect, others: &[Rect], full_edge: bool) -> Rect {
     if others.is_empty() {
         return moving.at(0, 0);
     }
@@ -156,12 +156,10 @@ fn snap_inner(moving: Rect, others: &[Rect], threshold: (i32, i32), full_edge: b
         let x_range = range(o.x, o.right(), moving.w);
 
         for x in [o.right(), o.x - moving.w] {
-            let y = align(moving.y, moving.h, others, threshold.1, false, y_range);
-            consider(moving.at(x, y));
+            consider(moving.at(x, moving.y.clamp(y_range.0, y_range.1)));
         }
         for y in [o.bottom(), o.y - moving.h] {
-            let x = align(moving.x, moving.w, others, threshold.0, true, x_range);
-            consider(moving.at(x, y));
+            consider(moving.at(moving.x.clamp(x_range.0, x_range.1), y));
         }
     }
 
@@ -174,27 +172,6 @@ fn snap_inner(moving: Rect, others: &[Rect], threshold: (i32, i32), full_edge: b
             moving.at(x, y)
         }
     }
-}
-
-/// Clamp a coordinate into `range`, then align its start or end edge with
-/// a parallel edge of another rect if one is within `threshold`.
-fn align(pos: i32, len: i32, others: &[Rect], threshold: i32, horizontal: bool, range: (i32, i32)) -> i32 {
-    let pos = pos.clamp(range.0, range.1);
-    let mut best: Option<(i32, i32)> = None;
-    for o in others {
-        let (start, end) = if horizontal { (o.x, o.right()) } else { (o.y, o.bottom()) };
-        // Candidate positions: our start or end aligned with their start or end.
-        for cand in [start, end, start - len, end - len] {
-            let d = (cand - pos).abs();
-            if d <= threshold
-                && (range.0..=range.1).contains(&cand)
-                && best.is_none_or(|(bd, _)| d < bd)
-            {
-                best = Some((d, cand));
-            }
-        }
-    }
-    best.map_or(pos, |(_, c)| c)
 }
 
 /// Rearrange `rects` so none overlap and none float detached from the
@@ -215,7 +192,7 @@ pub fn compact(fixed: Option<Rect>, centre: (i32, i32), rects: &[Rect]) -> Vec<R
     for i in order {
         let r = rects[i];
         let attached = placed.iter().any(|p| p.adjacent(&r)) && !placed.iter().any(|p| p.overlaps(&r));
-        let new = if placed.is_empty() || attached { r } else { snap_inner(r, &placed, (0, 0), true) };
+        let new = if placed.is_empty() || attached { r } else { snap_inner(r, &placed, true) };
         out[i] = new;
         placed.push(new);
     }
@@ -252,44 +229,45 @@ mod tests {
     #[test]
     fn snaps_gap_closed() {
         let others = [r(0, 0, FHD)];
-        let got = snap(r(2000, 0, FHD), &others, (50, 50));
+        let got = snap(r(2000, 0, FHD), &others);
         assert_eq!(got, r(1920, 0, FHD));
     }
 
     #[test]
     fn pushes_out_of_overlap() {
         let others = [r(0, 0, FHD)];
-        let got = snap(r(1800, 30, FHD), &others, (50, 50));
-        assert_eq!(got, r(1920, 0, FHD));
+        let got = snap(r(1800, 30, FHD), &others);
+        assert_eq!(got, r(1920, 30, FHD));
     }
 
     #[test]
-    fn keeps_offset_outside_threshold() {
+    fn keeps_offset() {
         let others = [r(0, 0, FHD)];
-        let got = snap(r(1920, 300, FHD), &others, (50, 50));
+        let got = snap(r(1920, 300, FHD), &others);
         assert_eq!(got, r(1920, 300, FHD));
     }
 
     #[test]
-    fn aligns_bottom_edges() {
+    fn does_not_line_up_edges() {
+        // 20 px from bottom-aligned, and it stays there.
         let others = [r(0, 0, (3840, 2160))];
-        let got = snap(r(3840, 1100, FHD), &others, (50, 50));
-        assert_eq!(got, r(3840, 1080, FHD));
+        let got = snap(r(3840, 1100, FHD), &others);
+        assert_eq!(got, r(3840, 1100, FHD));
     }
 
     #[test]
     fn corner_only_is_not_adjacent() {
         let others = [r(0, 0, FHD)];
         // Diagonal from the first monitor: must slide to share an edge.
-        let got = snap(r(1920, 1080, FHD), &others, (0, 0));
+        let got = snap(r(1920, 1080, FHD), &others);
         assert!(got == r(1920, 1079, FHD) || got == r(1919, 1080, FHD), "{got:?}");
     }
 
     #[test]
     fn snaps_below() {
         let others = [r(0, 0, FHD)];
-        let got = snap(r(10, 1200, FHD), &others, (50, 50));
-        assert_eq!(got, r(0, 1080, FHD));
+        let got = snap(r(10, 1200, FHD), &others);
+        assert_eq!(got, r(10, 1080, FHD));
     }
 
     #[test]
@@ -310,7 +288,7 @@ mod tests {
     #[test]
     fn avoids_overlapping_third_monitor() {
         let others = [r(0, 0, FHD), r(1920, 0, FHD)];
-        let got = snap(r(1900, 10, FHD), &others, (50, 50));
+        let got = snap(r(1900, 10, FHD), &others);
         assert!(!others.iter().any(|o| o.overlaps(&got)), "{got:?}");
     }
 
@@ -355,14 +333,12 @@ mod tests {
     }
 
     #[test]
-    fn one_cell_away_from_aligned_stays() {
-        // DP-6, eDP-1 and a scaled DP-7 right of eDP-1, top-aligned; DP-7
-        // dragged down one row (80 px), half a cell being (20, 40) px.
-        let others = [r(0, 0, FHD), r(1920, 138, FHD)];
-        let got = snap(r(3840, 218, (2048, 1152)), &others, (20, 40));
-        assert_eq!(got, r(3840, 218, (2048, 1152)));
-        // Within half a cell, it still aligns.
-        let got = snap(r(3840, 170, (2048, 1152)), &others, (20, 40));
-        assert_eq!(got, r(3840, 138, (2048, 1152)));
+    fn near_aligned_stays_where_dropped() {
+        // Left of a 2560x1440 monitor, with another to its right at y=202:
+        // dropped just above or below the top, or near the other's top.
+        let others = [r(0, 0, QHD), r(2560, 202, FHD)];
+        for y in [-100, 120, 190] {
+            assert_eq!(snap(r(-1920, y, FHD), &others), r(-1920, y, FHD));
+        }
     }
 }

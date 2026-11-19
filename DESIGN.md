@@ -71,9 +71,11 @@ Decisions made during development that aren't in the README.
     window to the output nearest its centre, and back when the panel returns).
   - Only logind's lid handling can be inhibited; anything else that suspends on the lid
     (e.g. an acpid handler running `systemctl suspend`) must be turned off by the user.
-- Dragging: on release, an edge within half a terminal cell (per axis) of another
-  monitor's parallel edge snaps to it, so any alignment is reachable by dragging and
-  moving one cell away from an aligned edge is never undone.
+- Dragging: on release, the monitor moves only as far as needed to share an edge with
+  another and overlap none; edges are not lined up with other monitors' edges. It is then
+  placed a whole number of map cells from the monitor it touches, as many as the map drew
+  during the drag, in the scale the map is redrawn at after the drop. So what was drawn is
+  what you get: drawn flush is flush, and drawn one row off stays one row off.
 - Monitors coming or going (including the panel when the lid takes it out of use) while
   the UI is open: unapplied edits are dropped and the UI shows the live state. During the
   "Keep these display settings?" countdown, the UI records the configuration to revert to
@@ -108,7 +110,7 @@ Decisions made during development that aren't in the README.
 - Saved profile for the current set → apply it (also at startup).
 - No profile:
   - new monitors are turned on at their preferred mode and placed right of the rightmost
-    existing monitor, top-aligned with it; existing monitors are untouched;
+    existing monitor, vertically centred on it; existing monitors are untouched;
   - when monitors were removed, the remaining ones slide together to close gaps;
   - if every monitor would be off, all are turned on at their preferred mode;
   - at startup, nothing is changed.

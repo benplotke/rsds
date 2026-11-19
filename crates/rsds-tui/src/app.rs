@@ -230,7 +230,8 @@ pub enum Choice {
     Refresh(Mode),
     Orientation(Transform),
     Scale(f64),
-    /// Duplicate the monitor with this number, or (None) don't.
+    /// Duplicate the monitor with this number, and so join its group of
+    /// duplicates (if it has one), or (None) don't.
     Duplicate(Option<usize>),
     LidClose(LidClose),
 }
@@ -321,6 +322,15 @@ impl View {
         }
     }
 
+    /// Column and row (unclipped, from the view's origin) of the cell a
+    /// layout point is drawn at, as in [`View::to_cells`].
+    fn cell_at(self, x: i32, y: i32) -> (i32, i32) {
+        (
+            ((x as f64 - self.origin.0) / self.px_per_col).round() as i32,
+            ((y as f64 - self.origin.1) / (self.px_per_col * Self::ROW_ASPECT)).round() as i32,
+        )
+    }
+
     /// Terminal cell rectangle for a layout rect, clipped to the view area.
     /// It includes the cells at both its start and end edges, so rects
     /// that share an edge share a row or column of cells there.
@@ -337,12 +347,42 @@ impl View {
         ratatui::layout::Rect::new(cx0, cy0, cx1 - cx0, cy1 - cy0)
     }
 
-    /// How close (x, y) in layout pixels an edge must be dropped to another
-    /// to snap to it: half a cell, so any alignment can be reached by
-    /// dragging, and moving one cell away from one is never undone.
-    pub fn snap_threshold(self) -> (i32, i32) {
-        let half = self.px_per_col / 2.0;
-        (half as i32, (half * Self::ROW_ASPECT) as i32)
+    /// `r`, dropped in this view, moved to be as many whole cells along
+    /// from the monitor it is beside (and across from one it is above or
+    /// below) as this view draws it, in the view the map will be redrawn
+    /// at with it there, if it then still touches and doesn't overlap.
+    /// Otherwise the map's rounding, or its change of scale, could show it
+    /// a cell away from where it was dropped, e.g. flush with a neighbour.
+    pub fn on_grid(self, r: Rect, others: &[Rect]) -> Rect {
+        let fits = |c: Rect| !others.iter().any(|o| o.overlaps(&c)) && others.iter().any(|o| o.adjacent(&c));
+        let beside = others.iter().find(|o| o.adjacent(&r) && (o.right() == r.x || r.right() == o.x));
+        let stacked = others.iter().find(|o| o.adjacent(&r) && (o.bottom() == r.y || r.bottom() == o.y));
+        let rows = beside.map(|n| (n, self.cell_at(r.x, r.y).1 - self.cell_at(n.x, n.y).1));
+        let cols = stacked.map(|n| (n, self.cell_at(r.x, r.y).0 - self.cell_at(n.x, n.y).0));
+        let fit = |c: Rect| View::fit(self.area, &others.iter().copied().chain([c]).collect::<Vec<_>>());
+        let mut out = r;
+        // The new view depends on where it goes; a few rounds settle it.
+        for _ in 0..4 {
+            let v = fit(out);
+            let mut next = out;
+            if let Some((n, k)) = rows {
+                let c = next.at(next.x, n.y + v.cells_to_px(0, k).1);
+                if fits(c) {
+                    next = c;
+                }
+            }
+            if let Some((n, k)) = cols {
+                let c = next.at(n.x + v.cells_to_px(k, 0).0, next.y);
+                if fits(c) {
+                    next = c;
+                }
+            }
+            if next == out {
+                break;
+            }
+            out = next;
+        }
+        out
     }
 
     /// Layout pixel offset for a movement of (dcol, drow) cells.
@@ -621,9 +661,29 @@ impl App {
         if e.duplicates.take().is_none() {
             return;
         }
+        self.regular_scale(index);
+        self.place_right(index);
+    }
+
+    /// Give entry `index`, which was a duplicate, the nearest regular scale.
+    fn regular_scale(&mut self, index: usize) {
+        let e = &mut self.entries[index];
         let scale = e.pending.scale;
         e.pending.scale = SCALES.into_iter().min_by(|a, b| (a - scale).abs().total_cmp(&(b - scale).abs())).unwrap_or(1.0);
-        self.place_right(index);
+    }
+
+    /// Entry `index`, which the others in its group duplicate, is leaving
+    /// the group: the group stays where it is, the first of the others
+    /// taking its role (and on its own, no longer duplicating).
+    fn hand_over_group(&mut self, index: usize) {
+        let dups = self.duplicates_of(index);
+        let Some((&first, rest)) = dups.split_first() else { return };
+        self.entries[first].duplicates = None;
+        self.regular_scale(first);
+        let name = self.entries[first].live.name.clone();
+        for &j in rest {
+            self.entries[j].duplicates = Some(name.clone());
+        }
     }
 
     /// Put entry `index` to the right of the others, centred on its
@@ -712,15 +772,31 @@ impl App {
         &self.monitor_set
     }
 
-    /// Label of a choice, naming the monitor a Duplicate choice refers to.
+    /// Label of a choice, naming the monitor (or group of duplicates, e.g.
+    /// "1 | 3") a Duplicate choice refers to.
     pub fn choice_label(&self, choice: &Choice, e: &Entry, short: bool) -> String {
         match choice {
-            Choice::Duplicate(Some(n)) => match self.entries.iter().find(|x| x.number == *n) {
-                Some(x) => format!("{n} {}", x.live.name),
-                None => n.to_string(),
-            },
+            Choice::Duplicate(Some(n)) => {
+                let Some(i) = self.entries.iter().position(|x| x.number == *n) else { return n.to_string() };
+                let dups = self.duplicates_of(i);
+                if dups.is_empty() {
+                    format!("{n} {}", self.entries[i].live.name)
+                } else {
+                    std::iter::once(i)
+                        .chain(dups)
+                        .map(|j| self.entries[j].number.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                }
+            }
             c => c.label(e, short),
         }
+    }
+
+    /// If entry `index` is in a group of duplicates, the entry the others
+    /// in it duplicate (which may be `index` itself).
+    pub fn group_of(&self, index: usize) -> Option<usize> {
+        self.source_of(index).or_else(|| (!self.duplicates_of(index).is_empty()).then_some(index))
     }
 
     pub fn select(&mut self, index: usize) {
@@ -952,15 +1028,21 @@ impl App {
         }
         if setting == Setting::Duplicate {
             let mut choices = vec![Choice::Duplicate(None)];
-            choices.extend(
-                self.entries
-                    .iter()
-                    .enumerate()
-                    .filter(|(j, x)| *j != self.selected && x.pending.enabled && x.duplicates.is_none())
-                    .map(|(_, x)| Choice::Duplicate(Some(x.number))),
-            );
-            let source = self.source_of(self.selected).map(|s| self.entries[s].number);
-            let current = choices.iter().position(|c| *c == Choice::Duplicate(source));
+            let group = self.group_of(self.selected).map(|s| self.entries[s].number);
+            match group {
+                // In a group: it can only leave it.
+                Some(n) => choices.push(Choice::Duplicate(Some(n))),
+                // Other monitors on their own, and groups (by the monitor
+                // the rest of the group duplicates).
+                None => choices.extend(
+                    self.entries
+                        .iter()
+                        .enumerate()
+                        .filter(|(j, x)| *j != self.selected && x.pending.enabled && x.duplicates.is_none())
+                        .map(|(_, x)| Choice::Duplicate(Some(x.number))),
+                ),
+            }
+            let current = choices.iter().position(|c| *c == Choice::Duplicate(group));
             return (choices, current);
         }
         let choices: Vec<Choice> = match setting {
@@ -1128,10 +1210,18 @@ impl App {
     /// duplicating. Monitors duplicating it then duplicate `target` too.
     fn set_duplicate(&mut self, index: usize, target: Option<usize>) {
         let Some(target) = target else {
-            if self.entries[index].duplicates.is_some() && self.restore_place(index) {
-                self.entries[index].duplicates = None;
-            } else {
-                self.stop_duplicating(index);
+            if self.entries[index].duplicates.is_some() {
+                if self.restore_place(index) {
+                    self.entries[index].duplicates = None;
+                } else {
+                    self.stop_duplicating(index);
+                }
+            } else if !self.duplicates_of(index).is_empty() {
+                // The others carry on as a group without it.
+                self.hand_over_group(index);
+                if !self.restore_place(index) {
+                    self.place_right(index);
+                }
             }
             self.fixup_layout(index, None);
             return;
@@ -1168,10 +1258,8 @@ impl App {
             let leaving = e.duplicates.is_none();
             e.pending.enabled = false;
             e.duplicates = None;
-            // Its duplicates become monitors of their own.
-            for j in self.duplicates_of(i) {
-                self.stop_duplicating(j);
-            }
+            // The others in its group carry on without it.
+            self.hand_over_group(i);
             self.fixup_layout(i, None);
             if leaving {
                 self.record_leaving(i, before);
@@ -1285,7 +1373,9 @@ impl App {
             return;
         }
         let Some(rect) = self.entries[d.index].rect() else { return };
-        if let Some(target) = self.drop_target(d.index, rect) {
+        // A group of duplicates can't join another; only a monitor on its own.
+        let target = self.duplicates_of(d.index).is_empty().then(|| self.drop_target(d.index, rect)).flatten();
+        if let Some(target) = target {
             // Back where it was first, so that it returns there if it
             // stops duplicating.
             self.entries[d.index].pending.position = d.start_pos;
@@ -1293,8 +1383,9 @@ impl App {
             self.set_duplicate(d.index, Some(number));
             return;
         }
-        let threshold = view.map_or((0, 0), View::snap_threshold);
-        let snapped = layout::snap(rect, &self.other_rects(d.index), threshold);
+        let others = self.other_rects(d.index);
+        let snapped = layout::snap(rect, &others);
+        let snapped = view.map_or(snapped, |v| v.on_grid(snapped, &others));
         self.entries[d.index].pending.position = (snapped.x, snapped.y);
         self.fixup_layout(d.index, None);
     }

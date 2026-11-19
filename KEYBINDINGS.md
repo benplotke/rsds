@@ -26,9 +26,14 @@ immediately; nothing reaches the display server until you apply.
 slider, `↑` makes the panel brighter and `↓` dimmer in 5% steps, and the change
 takes effect immediately. It is not part of Apply, Reset or the revert countdown.
 
-**Duplicate** lists Off and the other monitors that are on. A duplicate is drawn
-inside its source's box in the arrangement (e.g. `1 | 3`); dragging that box moves
-both, and the duplicate's scale is set for you.
+**Duplicate** groups monitors that show the same thing; every monitor in a group
+shows the group (e.g. `1 | 3`) as its Duplicate setting. For a monitor not in a
+group, it lists Off, the other monitors that are on, and each group as one
+option, which the monitor then joins. For a monitor in a group, it lists Off,
+which takes just that monitor out of the group (a group left with one monitor
+is no more), and its group. A group is drawn as one box in the arrangement;
+dragging it moves the whole group. The group is placed and sized by the monitor
+the others joined, whose scale you can set; the others' scales are set for you.
 
 **Nightlight** and **Lid Close** settings also take effect immediately (they are
 saved and applied by the daemon, `rsds-w daemon`, which must be running). Its temperature is a
@@ -74,7 +79,7 @@ first letter of each button is its key.
 | Action | Effect |
 |---|---|
 | Drag a monitor in the arrangement | Move it; on release it snaps next to the others |
-| Drop a monitor right on top of another | Duplicate that monitor (its centre must land in the middle half of the other) |
+| Drop a monitor right on top of another | Duplicate that monitor, or join its group (the dropped monitor's centre must land in the middle half of the other; a group can't be dropped onto another) |
 | Click a monitor or a row in the displays pane | Select that monitor |
 | Click a section | Switch to that section |
 | Click a setting | Select that setting |
