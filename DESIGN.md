@@ -71,11 +71,13 @@ Decisions made during development that aren't in the README.
     window to the output nearest its centre, and back when the panel returns).
   - Only logind's lid handling can be inhibited; anything else that suspends on the lid
     (e.g. an acpid handler running `systemctl suspend`) must be turned off by the user.
-- Dragging: on release, the monitor moves only as far as needed to share an edge with
-  another and overlap none; edges are not lined up with other monitors' edges. It is then
-  placed a whole number of map cells from the monitor it touches, as many as the map drew
-  during the drag, in the scale the map is redrawn at after the drop. So what was drawn is
-  what you get: drawn flush is flush, and drawn one row off stays one row off.
+- Dragging moves a monitor in whole map cells. On release it stays where it was drawn,
+  moved only as far as needed to share an edge with another and overlap none. An edge
+  drawn in line with the matching edge of a monitor it touches (top or bottom beside it,
+  left or right above or below it) is moved to be exactly in line; where both its edges
+  are drawn in line but can't both be, the top or left one wins. The map then keeps its
+  scale (moving by whole cells if needed to show everything) until something else
+  changes, so what was drawn is what you get.
 - Monitors coming or going (including the panel when the lid takes it out of use) while
   the UI is open: unapplied edits are dropped and the UI shows the live state. During the
   "Keep these display settings?" countdown, the UI records the configuration to revert to

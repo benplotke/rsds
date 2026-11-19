@@ -832,4 +832,76 @@ mod tests {
             }
         }
     }
+
+    /// The layout: 3 (DP-5) with 2 (DP-3) on top, left-aligned, and 1
+    /// (eDP-1) to its left, its bottom 23 px above 3's.
+    fn stacked() -> Vec<Output> {
+        vec![
+            output("DP-5", "AOC", &[(2560, 1440, 59951)], 0, (1920, 1080)),
+            output("DP-3", "ASUS", &[(1920, 1080, 60000)], 0, (1920, 0)),
+            output("eDP-1", "Chimei", &[(1920, 1080, 60008)], 0, (0, 1417)),
+        ]
+    }
+
+    const SIZES: [(u16, u16); 4] = [(100, 30), (160, 45), (200, 50), (240, 60)];
+
+    fn drawn(app: &App, i: usize) -> ratatui::layout::Rect {
+        app.hits.monitors.iter().find(|(j, _)| *j == i).unwrap().1
+    }
+
+    #[test]
+    fn drawn_flush_bottoms_become_flush() {
+        let mut tried = 0;
+        for (w, h) in SIZES {
+            let mut app = App::new(&stacked(), None);
+            let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+            t.draw(|f| ui::draw(f, &mut app)).unwrap();
+            let (one, three) = (drawn(&app, 0), drawn(&app, 2));
+            if one.bottom() != three.bottom() {
+                continue; // not drawn flush at this size
+            }
+            tried += 1;
+            // Picked up, moved and put back where it was.
+            let grab = (one.x + one.width / 2, one.y + one.height / 2);
+            app.begin_drag(0, grab);
+            app.drag_to((grab.0, grab.1 - 1));
+            app.drag_to(grab);
+            app.end_drag();
+            let (one, three) = (app.entries[0].rect().unwrap(), app.entries[2].rect().unwrap());
+            assert_eq!(one.bottom(), three.bottom(), "{w}x{h}");
+            assert_eq!(one.right(), three.x, "{w}x{h}");
+        }
+        assert!(tried > 0);
+    }
+
+    #[test]
+    fn dropped_along_the_top_stays_as_drawn() {
+        for (w, h) in SIZES {
+            // 2 moved along 3's top to be drawn flush with its right edge,
+            // and one column short of that.
+            for short in [0, 1] {
+                let mut app = App::new(&stacked(), None);
+                let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+                t.draw(|f| ui::draw(f, &mut app)).unwrap();
+                let (two, three) = (drawn(&app, 1), drawn(&app, 2));
+                let grab = (two.x + two.width / 2, two.y + two.height / 2);
+                app.begin_drag(1, grab);
+                app.drag_to((grab.0 + three.right() - two.right() - short, grab.1));
+                t.draw(|f| ui::draw(f, &mut app)).unwrap();
+                let during = drawn(&app, 1);
+                app.end_drag();
+                t.draw(|f| ui::draw(f, &mut app)).unwrap();
+                if short == 0 {
+                    // Lined up at the right; its left edge may then be drawn
+                    // a column over, as the widths differ by part of one.
+                    assert_eq!(drawn(&app, 1).right(), during.right(), "{w}x{h}");
+                } else {
+                    assert_eq!(drawn(&app, 1), during, "{w}x{h} {short}");
+                }
+                let (two, three) = (app.entries[1].rect().unwrap(), app.entries[2].rect().unwrap());
+                assert_eq!(two.bottom(), three.y, "{w}x{h} {short}");
+                assert_eq!(two.right() == three.right(), short == 0, "{w}x{h} {short}: {two:?} {three:?}");
+            }
+        }
+    }
 }

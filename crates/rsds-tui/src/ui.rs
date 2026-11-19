@@ -190,11 +190,19 @@ fn draw_arrangement(f: &mut Frame, app: &mut App, area: Rect) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let view = match app.frozen_view {
-        Some(v) => v,
-        None => {
-            let rects: Vec<LRect> = app.entries.iter().filter_map(Entry::rect).collect();
-            View::fit(inner, &rects)
+    let rects: Vec<Option<LRect>> = app.entries.iter().map(Entry::rect).collect();
+    let shown: Vec<LRect> = rects.iter().flatten().copied().collect();
+    // After a drag, the map keeps its scale while nothing else changes.
+    let kept = app
+        .kept_view
+        .as_ref()
+        .filter(|(v, kept)| v.area == inner && *kept == rects)
+        .and_then(|(v, _)| v.showing(&shown));
+    let view = match (app.frozen_view, kept) {
+        (Some(v), _) | (None, Some(v)) => v,
+        (None, None) => {
+            app.kept_view = None;
+            View::fit(inner, &shown)
         }
     };
     app.view = Some(view);

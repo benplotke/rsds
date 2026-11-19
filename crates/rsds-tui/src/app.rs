@@ -347,42 +347,69 @@ impl View {
         ratatui::layout::Rect::new(cx0, cy0, cx1 - cx0, cy1 - cy0)
     }
 
-    /// `r`, dropped in this view, moved to be as many whole cells along
-    /// from the monitor it is beside (and across from one it is above or
-    /// below) as this view draws it, in the view the map will be redrawn
-    /// at with it there, if it then still touches and doesn't overlap.
-    /// Otherwise the map's rounding, or its change of scale, could show it
-    /// a cell away from where it was dropped, e.g. flush with a neighbour.
-    pub fn on_grid(self, r: Rect, others: &[Rect]) -> Rect {
+    /// `r`, dropped in this view, with any edge that is drawn in line with
+    /// the matching edge of a monitor it touches (its top or bottom with
+    /// theirs beside it; its left or right with theirs above or below)
+    /// moved to be exactly in line, if it then still touches and overlaps
+    /// none. Where both its edges are drawn in line but can't both be, the
+    /// start edge (top, left) wins.
+    pub fn line_up(self, r: Rect, others: &[Rect]) -> Rect {
         let fits = |c: Rect| !others.iter().any(|o| o.overlaps(&c)) && others.iter().any(|o| o.adjacent(&c));
-        let beside = others.iter().find(|o| o.adjacent(&r) && (o.right() == r.x || r.right() == o.x));
-        let stacked = others.iter().find(|o| o.adjacent(&r) && (o.bottom() == r.y || r.bottom() == o.y));
-        let rows = beside.map(|n| (n, self.cell_at(r.x, r.y).1 - self.cell_at(n.x, n.y).1));
-        let cols = stacked.map(|n| (n, self.cell_at(r.x, r.y).0 - self.cell_at(n.x, n.y).0));
-        let fit = |c: Rect| View::fit(self.area, &others.iter().copied().chain([c]).collect::<Vec<_>>());
+        let row = |y: i32| self.cell_at(0, y).1;
+        let col = |x: i32| self.cell_at(x, 0).0;
         let mut out = r;
-        // The new view depends on where it goes; a few rounds settle it.
-        for _ in 0..4 {
-            let v = fit(out);
-            let mut next = out;
-            if let Some((n, k)) = rows {
-                let c = next.at(next.x, n.y + v.cells_to_px(0, k).1);
-                if fits(c) {
-                    next = c;
-                }
-            }
-            if let Some((n, k)) = cols {
-                let c = next.at(n.x + v.cells_to_px(k, 0).0, next.y);
-                if fits(c) {
-                    next = c;
-                }
-            }
-            if next == out {
-                break;
-            }
-            out = next;
+        let beside: Vec<Rect> =
+            others.iter().filter(|o| o.adjacent(&r) && (o.right() == r.x || r.right() == o.x)).copied().collect();
+        let ys = beside
+            .iter()
+            .filter(|o| row(o.y) == row(out.y))
+            .map(|o| o.y)
+            .chain(beside.iter().filter(|o| row(o.bottom()) == row(out.bottom())).map(|o| o.bottom() - out.h));
+        if let Some(c) = ys.map(|y| out.at(out.x, y)).find(|&c| fits(c)) {
+            out = c;
+        }
+        let stacked: Vec<Rect> =
+            others.iter().filter(|o| o.adjacent(&out) && (o.bottom() == out.y || out.bottom() == o.y)).copied().collect();
+        let xs = stacked
+            .iter()
+            .filter(|o| col(o.x) == col(out.x))
+            .map(|o| o.x)
+            .chain(stacked.iter().filter(|o| col(o.right()) == col(out.right())).map(|o| o.right() - out.w));
+        if let Some(c) = xs.map(|x| out.at(x, out.y)).find(|&c| fits(c)) {
+            out = c;
         }
         out
+    }
+
+    /// Whether all of `rects` are drawn whole, not clipped.
+    fn shows_all(self, rects: &[Rect]) -> bool {
+        rects.iter().all(|r| {
+            let (x0, y0) = self.cell_at(r.x, r.y);
+            let (x1, y1) = self.cell_at(r.right(), r.bottom());
+            x0 >= 0 && y0 >= 0 && x1 < self.area.width as i32 && y1 < self.area.height as i32
+        })
+    }
+
+    /// This view, if all of `rects` show in it whole, or else moved by whole
+    /// cells (so everything keeps its place on the grid of cells) to centre
+    /// them, if they then do.
+    pub fn showing(self, rects: &[Rect]) -> Option<View> {
+        if self.shows_all(rects) {
+            return Some(self);
+        }
+        let (col, row) = (self.px_per_col, self.px_per_col * Self::ROW_ASPECT);
+        let span = |a: Option<i32>, b: Option<i32>| (a.unwrap_or(0) + b.unwrap_or(0)) as f64 / 2.0;
+        let mid_x = span(rects.iter().map(|r| r.x).min(), rects.iter().map(|r| r.right()).max());
+        let mid_y = span(rects.iter().map(|r| r.y).min(), rects.iter().map(|r| r.bottom()).max());
+        let want = (mid_x - self.area.width as f64 * col / 2.0, mid_y - self.area.height as f64 * row / 2.0);
+        let v = View {
+            origin: (
+                self.origin.0 + ((want.0 - self.origin.0) / col).round() * col,
+                self.origin.1 + ((want.1 - self.origin.1) / row).round() * row,
+            ),
+            ..self
+        };
+        v.shows_all(rects).then_some(v)
     }
 
     /// Layout pixel offset for a movement of (dcol, drow) cells.
@@ -464,6 +491,9 @@ pub struct App {
     pub slider_drag: bool,
     /// View used while dragging, so the map does not rescale under the mouse.
     pub frozen_view: Option<View>,
+    /// View to keep after a drag, with the monitors' rects it was kept for:
+    /// used while they stay as that drag left them.
+    pub kept_view: Option<(View, Vec<Option<Rect>>)>,
     pub view: Option<View>,
     pub confirm: Option<Confirm>,
     /// When the Identify badges should be removed.
@@ -507,6 +537,7 @@ impl App {
             drag: None,
             slider_drag: false,
             frozen_view: None,
+            kept_view: None,
             view: None,
             confirm: None,
             identify_until: None,
@@ -1385,9 +1416,17 @@ impl App {
         }
         let others = self.other_rects(d.index);
         let snapped = layout::snap(rect, &others);
-        let snapped = view.map_or(snapped, |v| v.on_grid(snapped, &others));
-        self.entries[d.index].pending.position = (snapped.x, snapped.y);
+        let placed = view.map_or(snapped, |v| v.line_up(snapped, &others));
+        self.entries[d.index].pending.position = (placed.x, placed.y);
         self.fixup_layout(d.index, None);
+        // Keep the map's scale, so everything stays where it was drawn,
+        // following the shift of the layout to start at (0, 0).
+        if let Some(mut v) = view {
+            let (x, y) = self.entries[d.index].pending.position;
+            v.origin.0 += (x - placed.x) as f64;
+            v.origin.1 += (y - placed.y) as f64;
+            self.kept_view = Some((v, self.entries.iter().map(Entry::rect).collect()));
+        }
     }
 
     /// Discard unapplied edits.
