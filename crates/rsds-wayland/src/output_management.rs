@@ -347,7 +347,6 @@ impl Dispatch<ZwlrOutputManagerV1, ()> for State {
                     make: String::new(),
                     model: String::new(),
                     serial: None,
-                    physical_size_mm: None,
                     modes: Vec::new(),
                     enabled: false,
                     current_mode: None,
@@ -403,9 +402,6 @@ impl Dispatch<ZwlrOutputHeadV1, ()> for State {
         let o = &mut h.output;
         match event {
             Event::Name { name } => o.name = name,
-            Event::PhysicalSize { width, height } => {
-                o.physical_size_mm = (width > 0 && height > 0).then_some((width, height));
-            }
             Event::Enabled { enabled } => {
                 o.enabled = enabled != 0;
                 if !o.enabled {

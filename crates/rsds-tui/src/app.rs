@@ -4,11 +4,12 @@ use std::time::{Duration, Instant};
 
 use rsds_core::{
     Mode, Output, OutputConfig, Transform,
+    config::ConfigFile,
     nightlight::{self, Nightlight, TimeOfDay},
     lid_close::{LidClose, LidCloseSettings},
     layout::{self, Rect},
     mirror,
-    profile::{Profile, SavedOutput, SavedRestore, active_outputs, duplicate_sources, monitor_set},
+    profile::{Profile, SavedArea, SavedPlace, SavedRestore, active_outputs, duplicate_sources, monitor_set},
     unconfirmed,
 };
 
@@ -421,11 +422,21 @@ impl View {
     }
 }
 
-pub struct Drag {
+/// What the mouse is dragging.
+pub enum Drag {
+    /// A monitor (with its group of duplicates) on the map.
+    Monitor(MonitorDrag),
+    /// The brightness or temperature slider.
+    Slider,
+}
+
+pub struct MonitorDrag {
     pub index: usize,
     pub start_cell: (u16, u16),
     pub start_pos: (i32, i32),
     pub moved: bool,
+    /// The map as the drag began, so it doesn't rescale under the mouse.
+    pub view: View,
 }
 
 pub struct Confirm {
@@ -487,10 +498,6 @@ pub struct App {
     /// Digits typed so far into the time picker's column.
     typed_digits: u8,
     pub drag: Option<Drag>,
-    /// The mouse is dragging the brightness slider.
-    pub slider_drag: bool,
-    /// View used while dragging, so the map does not rescale under the mouse.
-    pub frozen_view: Option<View>,
     /// View to keep after a drag, with the monitors' rects it was kept for:
     /// used while they stay as that drag left them.
     pub kept_view: Option<(View, Vec<Option<Rect>>)>,
@@ -535,8 +542,6 @@ impl App {
             time_column: TimeColumn::Hour,
             typed_digits: 0,
             drag: None,
-            slider_drag: false,
-            frozen_view: None,
             kept_view: None,
             view: None,
             confirm: None,
@@ -589,9 +594,8 @@ impl App {
         if self.selected >= self.entries.len() {
             self.selected = self.entries.len().saturating_sub(1);
         }
-        if self.drag.as_ref().is_some_and(|d| d.index >= self.entries.len()) {
+        if self.monitor_drag().is_some_and(|d| d.index >= self.entries.len()) {
             self.drag = None;
-            self.frozen_view = None;
         }
     }
 
@@ -729,36 +733,54 @@ impl App {
         self.source_of(index).map(|s| self.entries[s].live.identity())
     }
 
-    /// Every entry's pending config and source, leaving out `except`.
-    fn snapshot(&self, except: Option<usize>) -> Vec<SavedOutput> {
+    /// Where the monitors that are on are, in the pending config.
+    fn places(&self) -> Vec<SavedPlace> {
         (0..self.entries.len())
-            .filter(|&j| Some(j) != except)
-            .map(|j| SavedOutput {
+            .filter(|&j| self.entries[j].rect().is_some())
+            .map(|j| SavedPlace {
                 identity: self.entries[j].live.identity(),
-                config: self.entries[j].pending.clone(),
+                position: self.entries[j].pending.position,
+                scale: self.entries[j].pending.scale,
                 duplicates: self.source_identity(j),
             })
             .collect()
     }
 
+    /// Where the monitors that are on, other than `except`, are and how big,
+    /// in the pending config.
+    fn areas(&self, except: Option<usize>) -> Vec<SavedArea> {
+        (0..self.entries.len())
+            .filter(|&j| Some(j) != except)
+            .filter_map(|j| {
+                let r = self.entries[j].rect()?;
+                Some(SavedArea {
+                    identity: self.entries[j].live.identity(),
+                    position: (r.x, r.y),
+                    size: (r.w, r.h),
+                    duplicates: self.source_identity(j),
+                })
+            })
+            .collect()
+    }
+
     /// Entry `index` just left the arrangement, which was `before`.
-    fn record_leaving(&mut self, index: usize, before: Vec<SavedOutput>) {
+    fn record_leaving(&mut self, index: usize, before: Vec<SavedPlace>) {
         let identity = self.entries[index].live.identity();
-        let after = self.snapshot(Some(index));
+        let after = self.areas(Some(index));
         self.restores.retain(|r| r.identity != identity);
         self.restores.push(SavedRestore { identity, before, after });
     }
 
     /// Whether the monitors other than the one `r` is for are where they
-    /// were right after it left, the same size and duplicating the same.
+    /// were right after it left, the same size and duplicating the same,
+    /// and the ones that were off are still off.
     fn unchanged_since(&self, r: &SavedRestore) -> bool {
-        let others = || self.entries.iter().enumerate().filter(|(_, e)| e.live.identity() != r.identity);
         r.after.iter().all(|s| self.entries.iter().any(|e| e.live.identity() == s.identity))
-            && others().all(|(j, e)| match r.after.iter().find(|s| s.identity == e.live.identity()) {
-                Some(s) => s.config.rect() == e.rect() && s.duplicates == self.source_identity(j),
-                // Not in the saved arrangement (the panel, with the lid
-                // closed), which is fine while it's off.
-                None => !e.pending.enabled,
+            && self.entries.iter().enumerate().filter(|(_, e)| e.live.identity() != r.identity).all(|(j, e)| {
+                match r.after.iter().find(|s| s.identity == e.live.identity()) {
+                    Some(s) => e.rect() == Some(s.rect()) && s.duplicates == self.source_identity(j),
+                    None => e.rect().is_none(),
+                }
             })
     }
 
@@ -777,8 +799,8 @@ impl App {
         let name_of = |id: &String| names.iter().find(|(i, _)| i == id).map(|(_, n)| n.clone());
         for e in self.entries.iter_mut() {
             let Some(saved) = r.before.iter().find(|s| s.identity == e.live.identity()) else { continue };
-            e.pending.position = saved.config.position;
-            e.pending.scale = saved.config.scale;
+            e.pending.position = saved.position;
+            e.pending.scale = saved.scale;
             // Its other settings are as they are now.
             if saved.identity != identity {
                 e.duplicates = saved.duplicates.as_ref().and_then(name_of);
@@ -790,11 +812,14 @@ impl App {
     /// Places to go back to, for a profile of `outputs`.
     pub fn restores_for(&self, outputs: &[Output]) -> Vec<SavedRestore> {
         let ids: Vec<String> = outputs.iter().map(Output::identity).collect();
-        let keep = |v: &[SavedOutput]| v.iter().filter(|s| ids.contains(&s.identity)).cloned().collect();
         self.kept_restores
             .iter()
             .filter(|r| ids.contains(&r.identity))
-            .map(|r| SavedRestore { identity: r.identity.clone(), before: keep(&r.before), after: keep(&r.after) })
+            .map(|r| SavedRestore {
+                identity: r.identity.clone(),
+                before: r.before.iter().filter(|s| ids.contains(&s.identity)).cloned().collect(),
+                after: r.after.iter().filter(|s| ids.contains(&s.identity)).cloned().collect(),
+            })
             .collect()
     }
 
@@ -1270,7 +1295,7 @@ impl App {
             return;
         }
         let leaving = self.entries[index].duplicates.is_none();
-        let before = self.snapshot(None);
+        let before = self.places();
         let name = self.entries[source].live.name.clone();
         for j in self.duplicates_of(index) {
             self.entries[j].duplicates = Some(name.clone());
@@ -1286,7 +1311,7 @@ impl App {
     pub fn toggle_enabled(&mut self) {
         let i = self.selected;
         let enabled_count = self.entries.iter().filter(|e| e.pending.enabled).count();
-        let before = self.snapshot(None);
+        let before = self.places();
         let Some(e) = self.entries.get_mut(i) else { return };
         if e.pending.enabled {
             if enabled_count <= 1 {
@@ -1372,24 +1397,32 @@ impl App {
         self.select(index);
         self.set_section(Section::Displays);
         self.focus = Focus::Displays;
-        let Some(e) = self.entries.get(index) else { return };
+        let (Some(e), Some(view)) = (self.entries.get(index), self.view) else { return };
         if !e.pending.enabled {
             return;
         }
-        self.drag = Some(Drag {
+        self.drag = Some(Drag::Monitor(MonitorDrag {
             index,
             start_cell: cell,
             start_pos: e.pending.position,
             moved: false,
-        });
-        self.frozen_view = self.view;
+            view,
+        }));
+    }
+
+    /// The monitor being dragged, if any.
+    pub fn monitor_drag(&self) -> Option<&MonitorDrag> {
+        match &self.drag {
+            Some(Drag::Monitor(d)) => Some(d),
+            _ => None,
+        }
     }
 
     pub fn drag_to(&mut self, cell: (u16, u16)) {
-        let (Some(d), Some(view)) = (self.drag.as_mut(), self.frozen_view) else { return };
+        let Some(Drag::Monitor(d)) = self.drag.as_mut() else { return };
         let dcol = cell.0 as i32 - d.start_cell.0 as i32;
         let drow = cell.1 as i32 - d.start_cell.1 as i32;
-        let (dx, dy) = view.cells_to_px(dcol, drow);
+        let (dx, dy) = d.view.cells_to_px(dcol, drow);
         d.moved |= dcol != 0 || drow != 0;
         self.entries[d.index].pending.position = (d.start_pos.0 + dx, d.start_pos.1 + dy);
     }
@@ -1406,8 +1439,8 @@ impl App {
     }
 
     pub fn end_drag(&mut self) {
-        let Some(d) = self.drag.take() else { return };
-        let view = self.frozen_view.take();
+        let Some(Drag::Monitor(d)) = self.drag.take() else { return };
+        let view = d.view;
         if !d.moved {
             return;
         }
@@ -1424,17 +1457,16 @@ impl App {
         }
         let others = self.other_rects(d.index);
         let snapped = layout::snap(rect, &others);
-        let placed = view.map_or(snapped, |v| v.line_up(snapped, &others));
+        let placed = view.line_up(snapped, &others);
         self.entries[d.index].pending.position = (placed.x, placed.y);
         self.fixup_layout(d.index, None);
         // Keep the map's scale, so everything stays where it was drawn,
         // following the shift of the layout to start at (0, 0).
-        if let Some(mut v) = view {
-            let (x, y) = self.entries[d.index].pending.position;
-            v.origin.0 += (x - placed.x) as f64;
-            v.origin.1 += (y - placed.y) as f64;
-            self.kept_view = Some((v, self.entries.iter().map(Entry::rect).collect()));
-        }
+        let mut v = view;
+        let (x, y) = self.entries[d.index].pending.position;
+        v.origin.0 += (x - placed.x) as f64;
+        v.origin.1 += (y - placed.y) as f64;
+        self.kept_view = Some((v, self.entries.iter().map(Entry::rect).collect()));
     }
 
     /// Discard unapplied edits.
@@ -1486,7 +1518,7 @@ impl App {
         for k in 0..self.restores.len() {
             let identity = &self.restores[k].identity;
             let index = self.entries.iter().position(|e| &e.live.identity() == identity);
-            self.restores[k].after = self.snapshot(index);
+            self.restores[k].after = self.areas(index);
         }
         self.kept_restores = self.restores.clone();
         Request::SaveProfile
@@ -1503,8 +1535,9 @@ impl App {
         }
         let rects: Vec<Option<Rect>> = self.entries.iter().map(Entry::rect).collect();
         let sources = mirror::infer(&rects, &self.current_sources());
-        for i in 0..self.entries.len() {
-            self.entries[i].duplicates = sources[i].map(|s| self.entries[s].live.name.clone());
+        let names: Vec<String> = self.entries.iter().map(|e| e.live.name.clone()).collect();
+        for (e, source) in self.entries.iter_mut().zip(sources) {
+            e.duplicates = source.map(|s| names[s].clone());
         }
         Some(Request::Revert(c.previous))
     }
@@ -1528,7 +1561,6 @@ impl App {
             self.status = Some("Monitors changed: unapplied changes discarded".into());
         }
         self.drag = None;
-        self.frozen_view = None;
         self.reset_pending();
         // The new set's places come with its profile (see `use_profile`).
         self.restores.clear();

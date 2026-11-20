@@ -2,7 +2,7 @@
 
 ## How to Run
 Because this is still in development, for now, you can start the daemon with
-`cargo run --release -p rsds-w daemon` and start the UI with `cargo run --release -p rsds-w`.
+`cargo run --release -p rsds-daemon` and start the UI with `cargo run --release -p rsds`.
 
 ## Goal
 This project aims to provide a high quality standalone manager for configuration of monitors. This includes sane defaults for newly plugged in monitors, automatic restoration of configuration when plugging into previously seen monitors, and an intuitive UI for configuring monitors. The feature set and experience are inspired by Windows 11's Display Settings, though it improves on it in many ways. The UI is inspired by btop.

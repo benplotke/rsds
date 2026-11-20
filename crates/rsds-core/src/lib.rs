@@ -1,6 +1,7 @@
 //! Display-server independent model of monitors and their configuration.
 
 pub mod badge;
+pub mod config;
 pub mod daemon_lock;
 pub mod layout;
 pub mod lid_close;

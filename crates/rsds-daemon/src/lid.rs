@@ -7,6 +7,7 @@ use std::os::fd::BorrowedFd;
 
 use rsds_core::{
     Backend, Output,
+    config::ConfigFile,
     lid_close::{LidClose, LidCloseSettings},
 };
 use rsds_logind::lid::{Inhibitor, Lid};
@@ -18,10 +19,18 @@ use crate::log;
 pub struct Policy {
     /// The machine should be suspended.
     pub suspend: bool,
-    /// The built-in panel is turned off and left out of the monitor set.
-    pub panel_out_of_set: bool,
-    /// The built-in panel stays in the layout but its display is off.
-    pub panel_dark: bool,
+    pub panel: Panel,
+}
+
+/// What happens to the built-in panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Panel {
+    /// In use as usual.
+    InUse,
+    /// Turned off and left out of the monitor set.
+    OutOfSet,
+    /// Kept in the layout, but its display is off.
+    Dark,
 }
 
 /// What to do given whether the lid is closed, whether an external monitor
@@ -33,11 +42,12 @@ pub fn policy(closed: bool, docked: bool, setting: LidClose) -> Policy {
             LidClose::SuspendUnlessDocked => !docked,
             LidClose::Never | LidClose::SystemDefault => false,
         };
-    Policy {
-        suspend,
-        panel_out_of_set: closed && docked && setting != LidClose::Suspend,
-        panel_dark: closed && !docked && setting == LidClose::Never,
-    }
+    let panel = match (closed, docked) {
+        (true, true) if setting != LidClose::Suspend => Panel::OutOfSet,
+        (true, false) if setting == LidClose::Never => Panel::Dark,
+        _ => Panel::InUse,
+    };
+    Policy { suspend, panel }
 }
 
 pub(crate) struct Service {
@@ -107,11 +117,12 @@ impl Service {
     /// Suspend or switch the panel's display as the policy calls for.
     pub(crate) fn update<B: Backend>(&mut self, backend: &mut B, outputs: &[Output]) {
         let p = self.policy(outputs);
-        if p.panel_dark != self.panel_dark {
-            self.panel_dark = p.panel_dark;
+        let dark = p.panel == Panel::Dark;
+        if dark != self.panel_dark {
+            self.panel_dark = dark;
             for o in outputs.iter().filter(|o| o.is_internal() && o.enabled) {
-                match backend.set_power(&o.name, !p.panel_dark) {
-                    Ok(()) => log!("{} display {}", o.name, if p.panel_dark { "off" } else { "on" }),
+                match backend.set_power(&o.name, !dark) {
+                    Ok(()) => log!("{} display {}", o.name, if dark { "off" } else { "on" }),
                     Err(e) => log!("can't switch {} display: {e}", o.name),
                 }
             }
@@ -153,44 +164,39 @@ fn load() -> LidClose {
 mod tests {
     use super::*;
 
+    fn p(suspend: bool, panel: Panel) -> Policy {
+        Policy { suspend, panel }
+    }
+
     #[test]
     fn always_suspend() {
-        let p = policy(true, true, LidClose::Suspend);
-        assert!(p.suspend && !p.panel_out_of_set && !p.panel_dark);
-        assert!(policy(true, false, LidClose::Suspend).suspend);
+        assert_eq!(policy(true, true, LidClose::Suspend), p(true, Panel::InUse));
+        assert_eq!(policy(true, false, LidClose::Suspend), p(true, Panel::InUse));
     }
 
     #[test]
     fn suspend_unless_docked() {
-        let docked = policy(true, true, LidClose::SuspendUnlessDocked);
-        assert!(!docked.suspend && docked.panel_out_of_set && !docked.panel_dark);
-        assert!(policy(true, false, LidClose::SuspendUnlessDocked).suspend);
+        assert_eq!(policy(true, true, LidClose::SuspendUnlessDocked), p(false, Panel::OutOfSet));
+        assert_eq!(policy(true, false, LidClose::SuspendUnlessDocked), p(true, Panel::InUse));
     }
 
     #[test]
     fn never_suspend() {
-        let docked = policy(true, true, LidClose::Never);
-        assert!(!docked.suspend && docked.panel_out_of_set && !docked.panel_dark);
-        let alone = policy(true, false, LidClose::Never);
-        assert!(!alone.suspend && !alone.panel_out_of_set && alone.panel_dark);
+        assert_eq!(policy(true, true, LidClose::Never), p(false, Panel::OutOfSet));
+        assert_eq!(policy(true, false, LidClose::Never), p(false, Panel::Dark));
     }
 
     #[test]
     fn system_default() {
-        let docked = policy(true, true, LidClose::SystemDefault);
-        assert!(!docked.suspend && docked.panel_out_of_set && !docked.panel_dark);
-        let alone = policy(true, false, LidClose::SystemDefault);
-        assert!(!alone.suspend && !alone.panel_out_of_set && !alone.panel_dark);
+        assert_eq!(policy(true, true, LidClose::SystemDefault), p(false, Panel::OutOfSet));
+        assert_eq!(policy(true, false, LidClose::SystemDefault), p(false, Panel::InUse));
     }
 
     #[test]
     fn open_lid_does_nothing() {
         for s in LidClose::ALL {
             for docked in [false, true] {
-                assert_eq!(
-                    policy(false, docked, s),
-                    Policy { suspend: false, panel_out_of_set: false, panel_dark: false }
-                );
+                assert_eq!(policy(false, docked, s), p(false, Panel::InUse));
             }
         }
     }

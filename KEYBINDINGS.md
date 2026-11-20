@@ -36,7 +36,7 @@ dragging it moves the whole group. The group is placed and sized by the monitor
 the others joined, whose scale you can set; the others' scales are set for you.
 
 **Nightlight** and **Lid Close** settings also take effect immediately (they are
-saved and applied by the daemon, `rsds-w daemon`, which must be running). Its temperature is a
+saved and applied by the daemon, `rsds-daemon`, which must be running). Its temperature is a
 slider: `↑` cooler (less tint), `↓` warmer, in 100 K steps from 1900 K to 6500 K.
 Nightlight's On/Off is whether it's on now; with Schedule on, it is switched on at
 "Turn on at" and off at "Turn off at", and can be switched either way in between.

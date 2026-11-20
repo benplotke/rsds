@@ -2,8 +2,18 @@
 name = "rsds-w"
 version = "0.1.0"
 edition = "2024"
+default-run = "rsds"
+
+[[bin]]
+name = "rsds"
+path = "src/bin/rsds.rs"
+
+[[bin]]
+name = "rsds-daemon"
+path = "src/bin/rsds-daemon.rs"
 
 [dependencies]
-rsds-daemon = { version = "0.1.0", path = "../rsds-daemon" }
+# Renamed: the `rsds-daemon` binary would otherwise share its crate name.
+daemon = { package = "rsds-daemon", version = "0.1.0", path = "../rsds-daemon" }
 rsds-tui = { version = "0.1.0", path = "../rsds-tui" }
 rsds-wayland = { version = "0.1.0", path = "../rsds-wayland" }

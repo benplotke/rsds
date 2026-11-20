@@ -198,7 +198,7 @@ fn draw_arrangement(f: &mut Frame, app: &mut App, area: Rect) {
         .as_ref()
         .filter(|(v, kept)| v.area == inner && *kept == rects)
         .and_then(|(v, _)| v.showing(&shown));
-    let view = match (app.frozen_view, kept) {
+    let view = match (app.monitor_drag().map(|d| d.view), kept) {
         (Some(v), _) | (None, Some(v)) => v,
         (None, None) => {
             app.kept_view = None;
@@ -210,7 +210,7 @@ fn draw_arrangement(f: &mut Frame, app: &mut App, area: Rect) {
     // Monitor borders go on one grid so neighbours share a single line,
     // drawn heavy where they join. A monitor being dragged may overlap the
     // others, so it is drawn on top as its own box instead.
-    let dragged = app.drag.as_ref().map(|d| d.index);
+    let dragged = app.monitor_drag().map(|d| d.index);
     let mut grid = BorderGrid::default();
     let mut boxes = Vec::new();
     // A duplicate is drawn as part of its source's box, which is selected

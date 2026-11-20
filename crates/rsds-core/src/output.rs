@@ -57,8 +57,6 @@ pub struct Output {
     pub make: String,
     pub model: String,
     pub serial: Option<String>,
-    /// Physical size in millimetres, if known.
-    pub physical_size_mm: Option<(i32, i32)>,
     pub modes: Vec<Mode>,
     pub enabled: bool,
     /// Index into `modes` of the current mode, if enabled.

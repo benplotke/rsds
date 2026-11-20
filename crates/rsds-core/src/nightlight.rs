@@ -3,8 +3,6 @@
 //! The UI edits the settings file; the daemon watches it and applies the
 //! colour temperature through the backend.
 
-use std::{io, path::PathBuf};
-
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Neutral colour temperature: no tint.
@@ -39,26 +37,8 @@ impl Default for Nightlight {
     }
 }
 
-impl Nightlight {
-    pub fn path() -> Option<PathBuf> {
-        crate::profile::config_dir().map(|d| d.join("nightlight.json"))
-    }
-
-    /// Load the settings; a missing file gives the defaults.
-    pub fn load() -> io::Result<Self> {
-        let path = Self::path().ok_or_else(|| io::Error::other("no home directory"))?;
-        match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .map_err(|e| io::Error::other(format!("{}: {e}", path.display()))),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(e),
-        }
-    }
-
-    pub fn save(&self) -> io::Result<()> {
-        let path = Self::path().ok_or_else(|| io::Error::other("no home directory"))?;
-        crate::profile::write_atomic(&path, &serde_json::to_vec_pretty(self).map_err(io::Error::other)?)
-    }
+impl crate::config::ConfigFile for Nightlight {
+    const NAME: &'static str = "nightlight.json";
 }
 
 /// Minutes after local midnight.

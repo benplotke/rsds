@@ -12,8 +12,11 @@ Decisions made during development that aren't in the README.
   if it can't be reached. Labwc checks each output of a request against the current state
   of the others, so freeing display bandwidth on one monitor and using it on another only
   works in steps (e.g. two 4K monitors on one MST dock).
-- One binary per package; the daemon is a subcommand. Unused UI code is never paged in,
-  so a single binary costs the daemon essentially no memory.
+- Two binaries per package: `rsds` (the UI) and `rsds-daemon`, with the same names in the
+  Wayland and X11 packages, which conflict with each other. A single binary with the
+  daemon as a subcommand cost the daemon memory: the kernel reads ahead around the pages
+  it uses, so most of the UI code was loaded too (measured PSS 1.24 MB with one binary,
+  0.92 MB with its own).
 - The UI is launched from a terminal (no `.desktop` file).
 
 ## Features
@@ -132,7 +135,9 @@ Decisions made during development that aren't in the README.
   Only position, scale and who duplicates whom are restored; other settings stay as they
   are now.
   - Places are kept through Apply and saved with the profile on Keep (`restores`: by
-    monitor identity, the layout before and the other monitors' layout after), so they
+    monitor identity, `before` gives the position, scale and source of each monitor that
+    was on, `after` the position, size and source of each other monitor that was on right
+    after), so they
     survive unplugging, replugging and restarting the UI. A place that no longer holds at
     Apply is dropped; on Keep the "after" layout is re-read from the live state to absorb
     the compositor's rounding.
@@ -141,8 +146,12 @@ Decisions made during development that aren't in the README.
   - With the lid closed, places are saved for the externals only.
 - Monitor identity in profiles: EDID make|model|serial; falls back to connector name when
   there is no serial.
+- `profiles.json` holds only what is used: a profile is its monitors (by identity; the set
+  is the identities); one that is off is just `"enabled": false`; one that is on has its
+  mode (without whether it is the preferred one), position, transform, scale and, for a
+  duplicate, `duplicates`. Connector names aren't saved, as they can change.
 
-## Daemon (`rsds-w daemon`)
+## Daemon (`rsds-daemon`)
 - Reacts only when the *set* of connected monitors changes (by identity), and once at startup.
   Ordinary configuration changes (from the UI, wlr-randr, …) are ignored.
 - A profile is saved only when the user presses Keep in the UI. The daemon never saves
@@ -157,10 +166,10 @@ Decisions made during development that aren't in the README.
 
 ## Crates
 - `rsds-core`: model, layout geometry (snapping, compaction, placing to the right),
-  profiles, Identify badge, `Backend` trait.
+  profiles and settings files, Identify badge, `Backend` trait.
 - `rsds-wayland`: wlroots backend.
 - `rsds-tui`: ratatui UI, generic over `Backend`.
 - `rsds-daemon`: hotplug/profile service, generic over `Backend`.
 - `rsds-logind`: logind/sysfs integration (backlight, lid state and inhibitor).
-- `rsds-w`: Wayland binary.
+- `rsds-w`: the Wayland binaries, `rsds` and `rsds-daemon`.
 - (to come) `rsds-x11`, `rsds-x`.

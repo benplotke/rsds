@@ -15,11 +15,10 @@ use std::{
 
 use rsds_core::{
     Backend,
+    config::{self, ConfigFile},
     nightlight::{Nightlight, TimeOfDay},
-    profile::config_dir,
 };
 use rustix::{
-    fs::inotify,
     time::{Itimerspec, TimerfdClockId, TimerfdFlags, TimerfdTimerFlags, Timespec},
 };
 
@@ -31,38 +30,32 @@ pub(crate) struct Service {
     applied: Option<u32>,
     /// When (seconds since the epoch) the schedule was last followed up to.
     checked: i64,
-    inotify: OwnedFd,
     timer: OwnedFd,
 }
 
 impl Service {
     pub(crate) fn new() -> io::Result<Self> {
-        let dir = config_dir().ok_or_else(|| io::Error::other("no home directory"))?;
-        std::fs::create_dir_all(&dir)?;
-        let inotify = inotify::init(inotify::CreateFlags::CLOEXEC | inotify::CreateFlags::NONBLOCK)?;
-        // Settings are written atomically (rename), so MOVED_TO covers the
-        // UI; CLOSE_WRITE covers editing the file in place.
-        inotify::add_watch(&inotify, &dir, inotify::WatchFlags::MOVED_TO | inotify::WatchFlags::CLOSE_WRITE)?;
         let timer = rustix::time::timerfd_create(
             TimerfdClockId::Realtime,
             TimerfdFlags::CLOEXEC | TimerfdFlags::NONBLOCK,
         )?;
         // The settings are as of when they were last written.
         let checked = Nightlight::path()
+            .ok()
             .and_then(|p| std::fs::metadata(p).ok())
             .and_then(|m| m.modified().ok())
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map_or_else(|| local_now().1, |d| d.as_secs() as i64);
-        Ok(Self { settings: load(), applied: None, checked, inotify, timer })
+        Ok(Self { settings: load(), applied: None, checked, timer })
     }
 
-    pub(crate) fn fds(&self) -> [BorrowedFd<'_>; 2] {
-        [self.inotify.as_fd(), self.timer.as_fd()]
+    /// Readable when the schedule's timer fires; then call `timer_fired`.
+    pub(crate) fn fd(&self) -> BorrowedFd<'_> {
+        self.timer.as_fd()
     }
 
     /// Something in the config directory changed: reload the settings.
     pub(crate) fn config_changed<B: Backend>(&mut self, backend: &mut B) {
-        drain(&self.inotify);
         let settings = load();
         if settings != self.settings {
             self.settings = settings;
@@ -74,7 +67,7 @@ impl Service {
 
     /// The schedule timer fired (or the clock was changed).
     pub(crate) fn timer_fired<B: Backend>(&mut self, backend: &mut B) {
-        drain(&self.timer);
+        config::drain(&self.timer);
         self.update(backend);
     }
 
@@ -127,18 +120,6 @@ fn load() -> Nightlight {
         log!("can't read nightlight settings: {e}");
         Nightlight::default()
     })
-}
-
-/// Read and discard everything pending on a non-blocking fd. (For the
-/// timer, a read can fail with ECANCELED after a clock change; that's fine,
-/// we re-evaluate either way.)
-fn drain(fd: &OwnedFd) {
-    let mut buf = [0u8; 4096];
-    while let Ok(n) = rustix::io::read(fd, &mut buf) {
-        if n == 0 {
-            break;
-        }
-    }
 }
 
 /// Current local time of day, and the current time in seconds since the epoch.

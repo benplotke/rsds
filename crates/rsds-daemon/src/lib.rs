@@ -21,6 +21,7 @@ use std::io;
 
 use rsds_core::{
     Backend, Error, Output, OutputConfig,
+    config::{self, ConfigFile},
     layout::{self, Rect},
     profile::{Profiles, active_outputs, duplicate_sources, monitor_set},
     unconfirmed,
@@ -36,6 +37,7 @@ pub fn run<B: Backend>(mut backend: B) -> io::Result<()> {
     let Some(_lock) = rsds_core::daemon_lock::acquire()? else {
         return Err(io::Error::other("the daemon is already running"));
     };
+    let config_watch = config::watch()?;
     let mut nightlight = nightlight::Service::new()?;
     nightlight.update(&mut backend);
 
@@ -47,7 +49,7 @@ pub fn run<B: Backend>(mut backend: B) -> io::Result<()> {
         let outputs = backend.outputs().to_vec();
         lid.update(&mut backend, &outputs);
 
-        let active = active_outputs(&outputs, lid.policy(&outputs).panel_out_of_set);
+        let active = active_outputs(&outputs, lid.policy(&outputs).panel == lid::Panel::OutOfSet);
         let set = monitor_set(&active);
         if known.as_ref() != Some(&set) {
             let lid_note = if active.len() < outputs.len() { " (lid closed)" } else { "" };
@@ -79,11 +81,10 @@ pub fn run<B: Backend>(mut backend: B) -> io::Result<()> {
         }
 
         let (config_ready, timer_ready, lid_ready) = {
-            let [config, timer] = nightlight.fds();
             let mut fds = vec![
                 PollFd::from_borrowed_fd(backend.fd(), PollFlags::IN),
-                PollFd::from_borrowed_fd(config, PollFlags::IN),
-                PollFd::from_borrowed_fd(timer, PollFlags::IN),
+                PollFd::new(&config_watch, PollFlags::IN),
+                PollFd::from_borrowed_fd(nightlight.fd(), PollFlags::IN),
             ];
             if let Some(fd) = lid.fd() {
                 fds.push(PollFd::from_borrowed_fd(fd, PollFlags::IN));
@@ -97,6 +98,7 @@ pub fn run<B: Backend>(mut backend: B) -> io::Result<()> {
         };
         backend.dispatch().map_err(io::Error::other)?;
         if config_ready {
+            config::drain(&config_watch);
             lid.config_changed();
             nightlight.config_changed(&mut backend);
         }
@@ -254,7 +256,6 @@ mod tests {
             make: "Make".into(),
             model: "Model".into(),
             serial: Some(serial.into()),
-            physical_size_mm: None,
             modes: vec![
                 Mode { width: 1280, height: 720, refresh_mhz: 60000, preferred: false },
                 Mode { width: 1920, height: 1080, refresh_mhz: 60000, preferred: true },

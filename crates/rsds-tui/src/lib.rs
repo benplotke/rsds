@@ -22,6 +22,7 @@ use ratatui::{
 };
 use rsds_core::{
     Backend, OutputConfig,
+    config::ConfigFile,
     profile::{Profiles, active_outputs},
     lid_close::LidClose,
 };
@@ -37,9 +38,17 @@ pub fn run<B: Backend>(mut backend: B) -> io::Result<()> {
     result
 }
 
-enum Flow {
-    Continue,
+/// What a key press or mouse event calls for.
+enum Action {
+    None,
+    Request(Request),
     Quit,
+}
+
+impl From<Option<Request>> for Action {
+    fn from(r: Option<Request>) -> Self {
+        r.map_or(Action::None, Action::Request)
+    }
 }
 
 fn event_loop<B: Backend>(terminal: &mut DefaultTerminal, backend: &mut B) -> io::Result<()> {
@@ -48,7 +57,8 @@ fn event_loop<B: Backend>(terminal: &mut DefaultTerminal, backend: &mut B) -> io
     // Learn whether the lid has taken the panel out of use.
     app.outputs_changed(backend.outputs(), lid_closed(&app));
     load_profile(&mut app, backend);
-    let settings = watch_settings();
+    // To show Nightlight as the daemon's schedule switches it.
+    let settings = rsds_core::config::watch().ok();
     let stdin = io::stdin();
     // Start crossterm's event source now so it installs its SIGWINCH
     // handler; the signal interrupts poll() below and we pick up resizes.
@@ -77,8 +87,7 @@ fn event_loop<B: Backend>(terminal: &mut DefaultTerminal, backend: &mut B) -> io
             fds.get(2).is_some_and(|f| !f.revents().is_empty())
         };
         if let (true, Some(fd)) = (settings_changed, &settings) {
-            let mut buf = [0u8; 4096];
-            while rustix::io::read(fd, &mut buf).is_ok_and(|n| n > 0) {}
+            rsds_core::config::drain(fd);
             app.reload_nightlight();
         }
 
@@ -93,38 +102,21 @@ fn event_loop<B: Backend>(terminal: &mut DefaultTerminal, backend: &mut B) -> io
             }
         }
         while event::poll(Duration::ZERO)? {
-            let request = match event::read()? {
-                Event::Key(key) => match handle_key(&mut app, key) {
-                    Ok(r) => r,
-                    Err(Flow::Quit) => return quit(&mut app, backend),
-                    Err(Flow::Continue) => None,
-                },
-                Event::Mouse(mouse) => match handle_mouse(&mut app, mouse) {
-                    Ok(r) => r,
-                    Err(Flow::Quit) => return quit(&mut app, backend),
-                    Err(Flow::Continue) => None,
-                },
-                _ => None,
+            let action = match event::read()? {
+                Event::Key(key) => handle_key(&mut app, key),
+                Event::Mouse(mouse) => handle_mouse(&mut app, mouse),
+                _ => Action::None,
             };
-            if let Some(r) = request {
-                perform(&mut app, backend, r);
+            match action {
+                Action::None => {}
+                Action::Request(r) => perform(&mut app, backend, r),
+                Action::Quit => return quit(&mut app, backend),
             }
         }
         if let Some(r) = app.tick(Instant::now()) {
             perform(&mut app, backend, r);
         }
     }
-}
-
-/// Watch the settings directory, to show Nightlight as the daemon's
-/// schedule switches it. None if it can't be watched.
-fn watch_settings() -> Option<rustix::fd::OwnedFd> {
-    use rustix::fs::inotify;
-    let dir = rsds_core::profile::config_dir()?;
-    std::fs::create_dir_all(&dir).ok()?;
-    let fd = inotify::init(inotify::CreateFlags::CLOEXEC | inotify::CreateFlags::NONBLOCK).ok()?;
-    inotify::add_watch(&fd, &dir, inotify::WatchFlags::MOVED_TO | inotify::WatchFlags::CLOSE_WRITE).ok()?;
-    Some(fd)
 }
 
 /// Take what the saved profile for the monitors in use knows: which
@@ -251,35 +243,33 @@ fn describe_change(from: &OutputConfig, to: &OutputConfig) -> String {
     parts.join(", ")
 }
 
-fn handle_key(app: &mut App, key: KeyEvent) -> Result<Option<Request>, Flow> {
+fn handle_key(app: &mut App, key: KeyEvent) -> Action {
     if key.kind == KeyEventKind::Release {
-        return Err(Flow::Continue);
+        return Action::None;
     }
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-        return Err(Flow::Quit);
+        return Action::Quit;
     }
     if app.confirm.is_some() {
-        return Ok(match key.code {
-            KeyCode::Enter | KeyCode::Char('k') | KeyCode::Char('y') => {
-                Some(app.keep())
-            }
-            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('r') => app.revert(),
-            KeyCode::Char('q') => return Err(Flow::Quit),
-            _ => None,
-        });
+        return match key.code {
+            KeyCode::Enter | KeyCode::Char('k') | KeyCode::Char('y') => Action::Request(app.keep()),
+            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('r') => app.revert().into(),
+            KeyCode::Char('q') => Action::Quit,
+            _ => Action::None,
+        };
     }
     match key.code {
         KeyCode::Char(c @ '0'..='9') => {
             app.type_digit(c as u16 - '0' as u16);
-            return Ok(None);
+            return Action::None;
         }
         _ => app.end_typing(),
     }
     match key.code {
-        KeyCode::Char('q') => return Err(Flow::Quit),
-        KeyCode::Char('a') | KeyCode::Enter => return Ok(app.apply()),
+        KeyCode::Char('q') => return Action::Quit,
+        KeyCode::Char('a') | KeyCode::Enter => return app.apply().into(),
         KeyCode::Char('r') => app.reset(),
-        KeyCode::Char('i') => return Ok(Some(app.identify())),
+        KeyCode::Char('i') => return Action::Request(app.identify()),
         KeyCode::Tab => app.cycle_focus(1),
         KeyCode::BackTab => app.cycle_focus(-1),
         KeyCode::Up | KeyCode::Char('k') => app.move_in_focus(-1),
@@ -288,7 +278,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<Option<Request>, Flow> {
         KeyCode::Right | KeyCode::Char('l') => app.move_focus(1),
         _ => {}
     }
-    Ok(None)
+    Action::None
 }
 
 /// Slider position (0..=1) for a mouse row on a vertical slider: the top
@@ -303,12 +293,12 @@ fn hit(r: &Rect, col: u16, row: u16) -> bool {
     r.contains(Position::new(col, row))
 }
 
-fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<Option<Request>, Flow> {
+fn handle_mouse(app: &mut App, m: MouseEvent) -> Action {
     let quit = app.confirm.is_none() && app.hits.quit.is_some_and(|r| hit(&r, m.column, m.row));
     if quit && m.kind == MouseEventKind::Down(MouseButton::Left) {
-        return Err(Flow::Quit);
+        return Action::Quit;
     }
-    Ok(mouse_request(app, m))
+    mouse_request(app, m).into()
 }
 
 /// What a mouse event other than clicking quit does.
@@ -343,7 +333,7 @@ fn mouse_request(app: &mut App, m: MouseEvent) -> Option<Request> {
                 app.setting = setting;
             } else if let Some(bar) = app.hits.slider.filter(|r| hit(r, col, row)) {
                 app.focus = Focus::Options;
-                app.slider_drag = true;
+                app.drag = Some(app::Drag::Slider);
                 app.set_slider(slider_fraction(bar, row));
             } else if let Some(&(column, value, _)) = app.hits.times.iter().find(|(_, _, r)| hit(r, col, row)) {
                 app.focus = Focus::Options;
@@ -360,14 +350,13 @@ fn mouse_request(app: &mut App, m: MouseEvent) -> Option<Request> {
                 return Some(app.identify());
             }
         }
-        MouseEventKind::Drag(MouseButton::Left) if app.slider_drag => {
+        MouseEventKind::Drag(MouseButton::Left) if matches!(app.drag, Some(app::Drag::Slider)) => {
             if let Some(bar) = app.hits.slider {
                 app.set_slider(slider_fraction(bar, row));
             }
         }
         MouseEventKind::Drag(MouseButton::Left) => app.drag_to((col, row)),
         MouseEventKind::Up(MouseButton::Left) => {
-            app.slider_drag = false;
             app.end_drag();
         }
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
@@ -395,7 +384,6 @@ mod tests {
             make: make.into(),
             model: "Model".into(),
             serial: Some("1".into()),
-            physical_size_mm: None,
             modes: modes
                 .iter()
                 .enumerate()

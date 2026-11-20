@@ -33,7 +33,7 @@ fn unix_now() -> u64 {
 /// Record `previous` as the configuration to go back to for `countdown`.
 pub fn save(previous: &[OutputConfig], countdown: Duration) -> io::Result<()> {
     let u = Unconfirmed { until: unix_now() + countdown.as_secs() + 1, previous: previous.to_vec() };
-    crate::profile::write_atomic(&path(), &serde_json::to_vec(&u).map_err(io::Error::other)?)
+    crate::config::write_atomic(&path(), &serde_json::to_vec(&u).map_err(io::Error::other)?)
 }
 
 /// The countdown ended: forget the configuration.
