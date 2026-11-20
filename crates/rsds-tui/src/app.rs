@@ -124,6 +124,8 @@ impl Section {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Setting {
     Enabled,
+    /// X11 only.
+    Primary,
     /// Built-in panel only; applied immediately, not part of Apply/Revert.
     Brightness,
     Resolution,
@@ -227,6 +229,7 @@ pub fn orientation_label(t: Transform) -> &'static str {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Choice {
     Enabled(bool),
+    Primary(bool),
     Resolution((i32, i32)),
     Refresh(Mode),
     Orientation(Transform),
@@ -242,6 +245,7 @@ impl Choice {
         let mode = e.pending.mode;
         match *self {
             Choice::Enabled(on) => on == e.pending.enabled,
+            Choice::Primary(p) => p == e.pending.primary,
             Choice::Resolution((w, h)) => mode.is_some_and(|m| m.width == w && m.height == h),
             Choice::Refresh(r) => mode.is_some_and(|m| m.same_as(&r)),
             Choice::Orientation(t) => t == e.pending.transform,
@@ -269,6 +273,7 @@ impl Choice {
         };
         match *self {
             Choice::Enabled(on) => if on { "On" } else { "Off" }.into(),
+            Choice::Primary(p) => if p { "Yes" } else { "No" }.into(),
             Choice::Resolution((w, h)) => format!("{w} × {h}{rec}"),
             Choice::Refresh(m) => format!("{:.3} Hz{rec}", m.refresh_hz()),
             Choice::Orientation(t) => orientation_label(t).into(),
@@ -508,6 +513,10 @@ pub struct App {
     pub status: Option<String>,
     /// The built-in panel's backlight, if this machine has one.
     pub backlight: Option<rsds_logind::Backlight>,
+    /// Whether the display server has a primary monitor (X11).
+    pub has_primary: bool,
+    /// Whether scale is real scaling (not on X11).
+    pub true_scaling: bool,
     pub hits: Hits,
     /// Identities of the monitors in use (see `active_outputs`), to notice
     /// monitors coming and going (including the panel when the lid closes).
@@ -548,6 +557,8 @@ impl App {
             identify_until: None,
             status: None,
             backlight,
+            has_primary: false,
+            true_scaling: true,
             hits: Hits::default(),
             monitor_set: monitor_set(outputs),
             restores: Vec::new(),
@@ -1042,8 +1053,11 @@ impl App {
             Section::Displays => {}
         }
         let mut v = DISPLAY_SETTINGS.to_vec();
+        if self.has_primary {
+            v.insert(1, Setting::Primary);
+        }
         if self.backlight.is_some() && self.selected_entry().is_some_and(|e| e.live.is_internal()) {
-            v.insert(1, Setting::Brightness);
+            v.insert(1 + self.has_primary as usize, Setting::Brightness);
         }
         v
     }
@@ -1111,6 +1125,7 @@ impl App {
         }
         let choices: Vec<Choice> = match setting {
             Setting::Enabled => vec![Choice::Enabled(true), Choice::Enabled(false)],
+            Setting::Primary => vec![Choice::Primary(true), Choice::Primary(false)],
             // A duplicate's scale follows from its source.
             Setting::Scale if e.duplicates.is_some() => Vec::new(),
             // Shown as a slider rather than a list.
@@ -1264,6 +1279,14 @@ impl App {
                 e.pending.mode = Some(mode);
                 return; // size unchanged
             }
+            Choice::Primary(p) => {
+                // Only one monitor can be primary.
+                for x in &mut self.entries {
+                    x.pending.primary = false;
+                }
+                self.entries[i].pending.primary = p;
+                return;
+            }
             Choice::Orientation(t) => e.pending.transform = t,
             Choice::Scale(scale) => e.pending.scale = scale,
         }
@@ -1321,6 +1344,8 @@ impl App {
             // A duplicate already left the arrangement when it became one.
             let leaving = e.duplicates.is_none();
             e.pending.enabled = false;
+            // X has no primary monitor that is off.
+            e.pending.primary = false;
             e.duplicates = None;
             // The others in its group carry on without it.
             self.hand_over_group(i);

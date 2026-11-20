@@ -44,6 +44,8 @@ pub struct SavedOn {
     /// Identity of the monitor this one duplicates, if any. Only needed to
     /// tell which is which when both are the same size.
     pub duplicates: Option<String>,
+    /// The primary monitor (X11).
+    pub primary: bool,
 }
 
 /// [`SavedOutput`] as written: `enabled`, and the rest only when it is on.
@@ -61,6 +63,8 @@ struct SavedOutputFile {
     scale: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     duplicates: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    primary: bool,
 }
 
 /// A mode as written: without whether it is the monitor's preferred one.
@@ -83,6 +87,7 @@ impl TryFrom<SavedOutputFile> for SavedOutput {
                 transform: f.transform.unwrap_or_default(),
                 scale: f.scale.unwrap_or(1.0),
                 duplicates: f.duplicates,
+                primary: f.primary,
             }),
             (true, ..) => return Err(format!("{}: a monitor that is on needs a mode and a position", f.identity)),
         };
@@ -104,6 +109,7 @@ impl From<SavedOutput> for SavedOutputFile {
             position: on.as_ref().map(|o| o.position),
             transform: on.as_ref().map(|o| o.transform),
             scale: on.as_ref().map(|o| o.scale),
+            primary: on.as_ref().is_some_and(|o| o.primary),
             duplicates: on.and_then(|o| o.duplicates),
         }
     }
@@ -175,14 +181,17 @@ impl Profile {
 
     /// The configuration to apply to `outputs`, with connector names
     /// resolved. None if the profile doesn't cover every output.
+    /// A profile without a primary monitor (as saved on Wayland) leaves
+    /// the primary monitor as it is.
     pub fn configs(&self, outputs: &[Output]) -> Option<Vec<OutputConfig>> {
+        let has_primary = self.outputs.iter().any(|s| s.on.as_ref().is_some_and(|on| on.primary));
         outputs
             .iter()
             .map(|o| {
                 let saved = self.outputs.iter().find(|s| s.identity == o.identity())?;
                 Some(match &saved.on {
                     // Off: the rest of its state doesn't matter.
-                    None => OutputConfig { enabled: false, ..o.config() },
+                    None => OutputConfig { enabled: false, primary: false, ..o.config() },
                     Some(on) => OutputConfig {
                         name: o.name.clone(),
                         enabled: true,
@@ -192,6 +201,7 @@ impl Profile {
                         position: on.position,
                         transform: on.transform,
                         scale: on.scale,
+                        primary: if has_primary { on.primary } else { o.primary },
                     },
                 })
             })
@@ -243,6 +253,7 @@ impl Profiles {
                         transform: o.transform,
                         scale: o.scale,
                         duplicates: source.map(|s| outputs[s].identity()),
+                        primary: o.primary,
                     }),
                 })
                 .collect(),
@@ -274,6 +285,7 @@ mod tests {
             position: (x, 0),
             transform: Transform::Normal,
             scale: 1.0,
+            primary: false,
         }
     }
 

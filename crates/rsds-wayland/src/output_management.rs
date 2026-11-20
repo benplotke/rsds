@@ -353,6 +353,7 @@ impl Dispatch<ZwlrOutputManagerV1, ()> for State {
                     position: (0, 0),
                     transform: Transform::Normal,
                     scale: 1.0,
+                    primary: false,
                 },
                 mode_proxies: Vec::new(),
                 current_mode_proxy: None,

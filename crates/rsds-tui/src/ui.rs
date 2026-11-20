@@ -35,7 +35,8 @@ const KEY: Color = Color::Rgb(0xff, 0x7a, 0x7a);
 pub fn draw(f: &mut Frame, app: &mut App) {
     app.hits = Hits::default();
     // Keep the bottom height stable when switching sections.
-    let display_settings = app::DISPLAY_SETTINGS.len() + app.backlight.is_some() as usize;
+    let display_settings =
+        app::DISPLAY_SETTINGS.len() + app.backlight.is_some() as usize + app.has_primary as usize;
     // Odd, so the time picker's current row can sit exactly in the middle.
     let rows = app
         .entries
@@ -498,8 +499,40 @@ fn draw_options(f: &mut Frame, app: &mut App, area: Rect) {
             draw_slider(f, app, area, fraction, format!("{k} K"), "cooler", "warmer");
         }
         Setting::ScheduleStart | Setting::ScheduleEnd => draw_time_picker(f, app, area),
+        Setting::Scale if !app.true_scaling && active => {
+            let note = Paragraph::new(SCALE_NOTE)
+                .style(Style::new().fg(INACTIVE))
+                .wrap(Wrap { trim: true });
+            let lines = wrapped_lines(SCALE_NOTE, area.width).min(area.height / 2);
+            let [choices, _, note_area] = Layout::vertical([
+                Constraint::Min(1),
+                Constraint::Length(1),
+                Constraint::Length(lines),
+            ])
+            .areas(area);
+            draw_choices(f, app, choices);
+            f.render_widget(note, note_area);
+        }
         _ => draw_choices(f, app, area),
     }
+}
+
+/// X11 has no real scaling: the monitor shows a larger or smaller part of
+/// the screen, resampled.
+const SCALE_NOTE: &str = "X11 resizes the image: not true scaling, less sharp.";
+
+/// Lines `text` takes when word-wrapped to `width`.
+fn wrapped_lines(text: &str, width: u16) -> u16 {
+    let (mut lines, mut used) = (1, 0);
+    for w in text.split_whitespace().map(|w| w.chars().count() as u16) {
+        if used > 0 && used + 1 + w > width {
+            lines += 1;
+            used = w;
+        } else {
+            used += w + (used > 0) as u16;
+        }
+    }
+    lines
 }
 
 /// Colours of the time picker's values by distance from the current one.
@@ -631,6 +664,7 @@ fn setting_text(app: &App, s: Setting) -> (&'static str, String, bool) {
     let active = on || s == Setting::Enabled;
     let value = match s {
         Setting::Enabled => Some(Choice::Enabled(on)),
+        Setting::Primary => on.then_some(Choice::Primary(e.pending.primary)),
         Setting::Brightness => {
             let value = app
                 .brightness()
@@ -657,6 +691,7 @@ fn setting_text(app: &App, s: Setting) -> (&'static str, String, bool) {
     let active = active && !(s == Setting::Scale && e.duplicates.is_some());
     let label = match s {
         Setting::Enabled => "Display",
+        Setting::Primary => "Primary",
         Setting::Resolution => "Resolution",
         Setting::Refresh => "Refresh rate",
         Setting::Orientation => "Orientation",

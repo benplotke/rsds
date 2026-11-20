@@ -265,6 +265,7 @@ mod tests {
             position: pos.unwrap_or((0, 0)),
             transform: Transform::Normal,
             scale: 1.0,
+            primary: false,
         }
     }
 

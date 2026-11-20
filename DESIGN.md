@@ -4,6 +4,8 @@ Decisions made during development that aren't in the README.
 
 ## Scope
 - Wayland: wlroots compositors only (`wlr-output-management`, `wlr-gamma-control`, `wlr-layer-shell`).
+- X11: RandR 1.3+ (CRTC transforms, primary output), over x11rb's pure-Rust connection
+  (no libxcb).
 - Talk to the display server protocols directly (`wayland-client`, `x11rb`) rather than
   shelling out to `wlr-randr`/`xrandr`: the daemon needs a live connection anyway for
   hotplug events and (on Wayland) to hold the Nightlight gamma ramp.
@@ -17,11 +19,32 @@ Decisions made during development that aren't in the README.
   daemon as a subcommand cost the daemon memory: the kernel reads ahead around the pages
   it uses, so most of the UI code was loaded too (measured PSS 1.24 MB with one binary,
   0.92 MB with its own).
+  - Both packages' crates (`rsds-w`, `rsds-x`) are in one workspace, so building both at
+    once (`cargo build --workspace`) clobbers `target/*/rsds`; build one with `-p`.
 - The UI is launched from a terminal (no `.desktop` file).
 
 ## Features
 - "Primary" is hidden on Wayland (wlroots has no such concept).
 - X11 offers scale via `xrandr --scale`-style transforms, with a note that it isn't true scaling.
+  - Scale s is the CRTC transform diag(1/s, 1/s, 1) (bilinear filter, nearest at 1), its
+    16.16 factor rounded down so a monitor at 125% covers exactly 2048 of 2560 px. Read
+    back as 1/factor rounded to 1/256.
+- Primary (X11): one monitor or none; Yes on one sets No on the others; turning a monitor off
+  makes it not primary. Saved in the profile as `"primary": true`. A profile without a
+  primary monitor (e.g. saved on Wayland) leaves the primary as it is.
+- X11 apply: with the server grabbed, CRTCs that go off, change output or don't fit the new
+  screen size are turned off, the screen is resized to the layout's bounding box (keeping
+  the DPI it had at startup), then each changed CRTC is set; an output that stays on keeps
+  its CRTC. The layout is shifted so nothing is at a negative position. If a step is
+  refused, the previous configuration is put back. `test` can only check what is known
+  beforehand (modes, free CRTCs, maximum screen size).
+- X11 keeps a CRTC going when its monitor is unplugged; the backend turns such CRTCs off
+  (shrinking the screen) whenever it sees one.
+- X11 monitor identity: make, model and serial are read from EDID as libdisplay-info names
+  them (make from hwdata's `pnp.ids`, else the PNP ID; model `0x%04X` without a name;
+  serial `0x%08X` without a serial string), so profiles carry over between X11 and Wayland.
+- X11 modes that differ only in timings or sync flags (same size and refresh, to the mHz)
+  are listed once, the first (preferred) kept.
 - Nightlight: held by the daemon; fixed-time schedule only; adjustable colour temperature.
   - Settings in `~/.config/rsds/nightlight.json` (`enabled`, `temperature` in K, `schedule`,
     `start`/`end` as "HH:MM"). The UI writes it on every change; the daemon watches the
@@ -36,6 +59,8 @@ Decisions made during development that aren't in the README.
     time after suspend and clock changes (CANCEL_ON_SET). Local time via libc (DST-aware).
   - Wayland: wlr-gamma-control on every output, re-applied to outputs connected later.
     Colour from a black-body approximation (Tanner Helland), 1900–6500 K.
+  - X11: RandR CRTC gamma on every active CRTC, re-applied when the active CRTCs or their
+    modes change. Unlike on Wayland, the tint stays if the daemon exits.
   - The daemon holds a flock on `$XDG_RUNTIME_DIR/rsds-daemon.lock`; a second daemon
     refuses to start, and the UI uses it to warn when the daemon isn't running.
 - UI sections: a left-most pane switches between Displays (sections · displays · settings
@@ -61,7 +86,10 @@ Decisions made during development that aren't in the README.
     `HandleLidSwitchDocked=ignore` would otherwise keep a docked laptop awake).
   - Suspend unless docked: suspend without an external monitor; with one, turn the panel off.
   - Never suspend: with an external monitor, as above; without one, the panel's display
-    is switched off (wlr-output-power-management) but it stays in the layout.
+    is switched off (wlr-output-power-management) but it stays in the layout. X11 can only
+    do this with DPMS, which switches off every display (only the panel is connected
+    then) and switches back on at any input. DPMS is enabled for this if it was off, and
+    disabled again when the lid opens.
   - System default: no inhibitor, so logind (`HandleLidSwitch*` in logind.conf) decides
     whether to suspend; the daemon never suspends. With an external monitor, the panel is
     still turned off as above. Without one, the daemon does nothing. Choosing it hands the
@@ -171,5 +199,6 @@ Decisions made during development that aren't in the README.
 - `rsds-tui`: ratatui UI, generic over `Backend`.
 - `rsds-daemon`: hotplug/profile service, generic over `Backend`.
 - `rsds-logind`: logind/sysfs integration (backlight, lid state and inhibitor).
+- `rsds-x11`: X11 (RandR) backend.
 - `rsds-w`: the Wayland binaries, `rsds` and `rsds-daemon`.
-- (to come) `rsds-x11`, `rsds-x`.
+- `rsds-x`: the X11 binaries, `rsds` and `rsds-daemon`.

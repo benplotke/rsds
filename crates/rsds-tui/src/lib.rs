@@ -53,6 +53,8 @@ impl From<Option<Request>> for Action {
 
 fn event_loop<B: Backend>(terminal: &mut DefaultTerminal, backend: &mut B) -> io::Result<()> {
     let mut app = App::new(backend.outputs(), rsds_logind::Backlight::find());
+    app.has_primary = backend.has_primary();
+    app.true_scaling = backend.true_scaling();
     app.load_settings();
     // Learn whether the lid has taken the panel out of use.
     app.outputs_changed(backend.outputs(), lid_closed(&app));
@@ -394,6 +396,7 @@ mod tests {
             position: pos,
             transform: Transform::Normal,
             scale: 1.0,
+            primary: false,
         }
     }
 
@@ -424,6 +427,26 @@ mod tests {
         let mut app = App::new(&sample(), None);
         println!("{}", render(&mut app));
         assert_eq!(app.entries[0].live.name, "eDP-1");
+    }
+
+    #[test]
+    fn one_primary_and_only_when_on() {
+        let mut outputs = sample();
+        outputs[2].primary = true;
+        let mut app = App::new(&outputs, None);
+        assert!(!app.settings().contains(&Setting::Primary), "hidden without a primary concept");
+        app.has_primary = true;
+        app.true_scaling = false;
+        assert_eq!(app.settings()[1], Setting::Primary);
+        app.selected = 1;
+        app.setting = Setting::Primary;
+        app.choose(0); // Yes
+        let primary: Vec<bool> = app.entries.iter().map(|e| e.pending.primary).collect();
+        assert_eq!(primary, [false, true, false]);
+        app.setting = Setting::Scale;
+        assert!(render(&mut app).contains("X11 resizes"));
+        app.toggle_enabled();
+        assert!(!app.entries[1].pending.primary);
     }
 
     #[test]

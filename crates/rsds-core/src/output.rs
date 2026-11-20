@@ -65,6 +65,8 @@ pub struct Output {
     pub position: (i32, i32),
     pub transform: Transform,
     pub scale: f64,
+    /// The primary monitor (X11 only; always false on Wayland).
+    pub primary: bool,
 }
 
 impl Output {
@@ -118,6 +120,7 @@ impl Output {
             position: c.position,
             transform: c.transform,
             scale: c.scale,
+            primary: c.primary,
             ..self.clone()
         }
     }
@@ -131,6 +134,7 @@ impl Output {
             position: self.position,
             transform: self.transform,
             scale: self.scale,
+            primary: self.primary,
         }
     }
 }
@@ -164,4 +168,7 @@ pub struct OutputConfig {
     pub position: (i32, i32),
     pub transform: Transform,
     pub scale: f64,
+    /// Make this the primary monitor (X11 only).
+    #[serde(default)]
+    pub primary: bool,
 }

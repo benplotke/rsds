@@ -25,6 +25,18 @@ pub trait Backend {
     /// Returns true if the set of outputs or their state changed.
     fn dispatch(&mut self) -> Result<bool, Error>;
 
+    /// Whether the display server has a primary monitor (X11 does,
+    /// Wayland doesn't). Without one, `primary` is ignored.
+    fn has_primary(&self) -> bool {
+        false
+    }
+
+    /// Whether scale is real scaling (Wayland) rather than rendering at
+    /// another size and resampling (X11).
+    fn true_scaling(&self) -> bool {
+        true
+    }
+
     /// Current state of all connected outputs, enabled or not.
     fn outputs(&self) -> &[Output];
 
