@@ -1,8 +1,14 @@
 # (rsds) Reasonably Sane Display Settings README
 
+![Screen shot of the TUI with 3 monitors](assets/screen-shot.png)
+
 ## How to Run
-Because this is still in development, for now, you can start the daemon with
-`cargo run --release -p rsds-w --bin rsds-daemon` and start the UI with `cargo run --release -p rsds-w --bin rsds`. On X11, you can swap the `-w` for `-x`.
+Packages are available in the AUR for [Wayland](https://aur.archlinux.org/packages/rsds-w) and [X11](https://aur.archlinux.org/packages/rsds-x). I developed on Labwc for Wayland and Openbox for X11. I also tested on Niri. Other compositors or window managers may not work as well.
+
+To start the daemon on login, you can add `rsds-daemon &` to `~/.config/labwc/autostart` or the equivalent location for your setup.
+
+For development, you can start the daemon with
+`cargo run --release -p rsds-w --bin rsds-daemon` and start the UI with `cargo run --release -p rsds-w --bin rsds`. On X11, you can swap the `-w` for `-x`. The X11 release and the Wayland release both create binaries with the same name.
 
 ## Goal
 This project aims to provide a high quality standalone manager for configuration of monitors. This includes sane defaults for newly plugged in monitors, automatic restoration of configuration when plugging into previously seen monitors, and an intuitive UI for configuring monitors. The feature set and experience are inspired by Windows 11's Display Settings, though it improves on it in many ways. The UI is inspired by btop.
